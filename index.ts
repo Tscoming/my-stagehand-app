@@ -3,6 +3,12 @@ import { Stagehand } from "@browserbasehq/stagehand";
 import { readFileSync } from "fs";
 import { join } from "path";
 
+// 设置终端输出编码为 UTF-8 (Windows)
+if (process.platform === "win32") {
+  process.stdout.setDefaultEncoding("utf-8");
+  process.stderr.setDefaultEncoding("utf-8");
+}
+
 async function main() {
   const stagehand = new Stagehand({
     env: "LOCAL",
@@ -28,6 +34,9 @@ async function main() {
   // 尝试通过内部 Playwright context 添加 cookies
   console.log(`Attempting to add cookies to browser context...`);
   
+  // 获取页面对象
+  const page = stagehand.context.pages()[0];
+  
   try {
     // 方法1: 尝试通过 stagehand.context 的内部属性访问
     // @ts-ignore
@@ -43,10 +52,9 @@ async function main() {
     console.log(`Direct context method failed, trying alternative...`);
     
     // 方法2: 先访问一个页面，然后使用 evaluate 注入 cookies
-    const page = stagehand.context.pages()[0];
     await page.goto("https://creator.douyin.com");
     
-    // 使用 addInitScript 在页面加载前注入 cookies
+    // 使用 evaluate 注入 cookies
     console.log(`Injecting cookies via browser storage...`);
     
     for (const cookie of cookiesData.cookies) {
@@ -62,31 +70,9 @@ async function main() {
     }
     
     console.log(`✓ Cookies injected via document.cookie`);
-    await page.reload();
-    
-    // 跳过后面的 goto，因为已经在页面上了
-    await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(3000);
-    
-    const currentUrl = page.url();
-    const pageTitle = await page.title();
-    
-    console.log(`\n当前页面信息:`);
-    console.log(`- URL: ${currentUrl}`);
-    console.log(`- 标题: ${pageTitle}`);
-    
-    console.log(`\n浏览器将保持打开 30 秒，以便你手动验证认证状态...`);
-    console.log(`请检查浏览器窗口，确认是否已登录。`);
-    
-    await page.waitForTimeout(30000);
-    
-    console.log(`\n关闭浏览器...`);
-    await stagehand.close();
-    return;
   }
   
-  // 如果成功通过 context 添加了 cookies，继续常规流程
-  const page = stagehand.context.pages()[0];
+  // 无论使用哪种方法，都导航到目标页面
   await page.goto("https://creator.douyin.com");
   
   console.log(`✓ Authenticated with Douyin cookies!`);
@@ -141,16 +127,16 @@ async function main() {
 
   // 现在你可以使用 Stagehand 在已认证的页面上执行操作
   // 例如：
-  // const extractResult = await stagehand.extract("提取页面上的用户信息");
-  // console.log(`Extract result:\n`, extractResult);
+  console.log(`\n尝试提取页面上的用户信息...`);
+  const extractResult = await stagehand.extract("提取页面上的用户信息");
+  console.log(`Extract result:\n`, extractResult);
+ 
+  const actResult = await stagehand.act("点击<高清发布>下拉列表按钮，并选择<发布视频>选项");
+  console.log(`Act result:\n`, actResult);
 
-  // const actResult = await stagehand.act("点击某个按钮");
-  // console.log(`Act result:\n`, actResult);
-
+  // 保持浏览器打开 30 秒，让用户可以手动验证
   console.log(`\n浏览器将保持打开 30 秒，以便你手动验证认证状态...`);
   console.log(`请检查浏览器窗口，确认是否已登录。`);
-  
-  // 保持浏览器打开 30 秒，让用户可以手动验证
   await page.waitForTimeout(30000);
   
   console.log(`\n关闭浏览器...`);
