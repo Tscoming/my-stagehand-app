@@ -487,7 +487,7 @@ async function handleAutoVideoCover(page: Page) {
 }
 
 /**
- * 发布视频
+ * 发布视频 - 修复版本，使用与 Python debug/main.py 一致的定位方式
  */
 async function publishVideo(page: Page) {
   console.log(`\n[发布流程] 准备发布视频...`);
@@ -497,65 +497,137 @@ async function publishVideo(page: Page) {
   await page.waitForTimeout(1000);
   
   let attempts = 0;
-  while (attempts < 5) {
+  const maxAttempts = 5;
+  
+  while (attempts < maxAttempts) {
     try {
-      // 使用精确匹配（与 Python 一致）
-      let publishButton = page.locator('button:has-text("发布")').first();
-      
-      // 尝试多种选择器
-      let buttonCount = await publishButton.count();
-      if (buttonCount === 0) {
-        // 尝试查找所有按钮
-        publishButton = page.locator('button').first();
-        buttonCount = await page.locator('button').count();
-        console.log(`  [-] 页面共有 ${buttonCount} 个按钮，尝试查找第一个按钮`);
-      }
-      
-      // 调试：保存页面截图
+      // 保存页面截图用于调试
       await page.screenshot({ path: './debug/publish_page_state.png' });
       console.log(`  [-] 已保存发布页面截图`);
       
-      // 使用 evaluate 来滚动（兼容 Stagehand）
-      await page.evaluate(() => {
-        const btn = document.querySelector('button');
-        if (btn) btn.scrollIntoView({ block: 'center' });
-      });
-      await page.waitForTimeout(500);
-      if (await publishButton.count() > 0) {
-        // 确保按钮可见 - 使用 evaluate 方式
-        await page.evaluate(() => {
-          const btns = document.querySelectorAll('button');
-          if (btns.length > 0) btns[0].scrollIntoView({ block: 'center' });
+      // 使用兼容的定位方式
+      // 先尝试 CSS 选择器
+      let publishButton = page.locator('button:has-text("发布")');
+      let buttonCount = await publishButton.count();
+      console.log(`  [-] 尝试 CSS 选择器 button:has-text("发布"), 数量: ${buttonCount}`);
+      
+      // 尝试 XPath 方式
+      if (buttonCount === 0) {
+        publishButton = page.locator('xpath=//button[contains(text(), "发布")]');
+        buttonCount = await publishButton.count();
+        console.log(`  [-] 尝试 XPath 方式, 数量: ${buttonCount}`);
+      }
+      
+      // 尝试纯 XPath 精确匹配
+      if (buttonCount === 0) {
+        publishButton = page.locator('xpath=//button[text()="发布"]');
+        buttonCount = await publishButton.count();
+        console.log(`  [-] 尝试 XPath 精确匹配, 数量: ${buttonCount}`);
+      }
+      
+      // 如果还是找不到，打印所有按钮用于调试
+      if (buttonCount === 0) {
+        const allButtons = await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          return btns.map((btn, idx) => ({
+            index: idx,
+            text: btn.textContent?.trim().substring(0, 30),
+            className: btn.className,
+          }));
         });
-        await page.waitForTimeout(500);
-        await publishButton.click();
-        console.log(`[发布流程] 已点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
+        console.log(`  [-] 页面上的所有按钮:`, JSON.stringify(allButtons));
         
-        try {
-          // 等待跳转至管理页
+        // 备选方案：直接用 evaluate 点击包含"发布"文本的按钮
+        console.log(`  [-] 尝试使用 evaluate 直接点击...`);
+        const clicked = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          for (const btn of buttons) {
+            if (btn.textContent?.trim() === '发布') {
+              btn.click();
+              return true;
+            }
+          }
+          return false;
+        });
+        
+        if (clicked) {
+          console.log(`[发布流程] 已通过 evaluate 点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
+          
+          // 等待跳转
           let redirected = false;
           const waitStart = Date.now();
-          while (Date.now() - waitStart < 5000) {
+          while (Date.now() - waitStart < 3000) {
             if (page.url().includes("/content/manage")) {
               redirected = true;
-              break;
+              console.log(`✓ [发布流程] 视频发布成功!`);
+              return true;
             }
             await page.waitForTimeout(500);
           }
-
-          if (redirected) {
-            console.log(`✓ [发布流程] 视频发布成功!`);
-            return true;
+          
+          if (!redirected) {
+            console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
+            await handleAutoVideoCover(page);
           }
-          console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
-          await handleAutoVideoCover(page);
+          continue;
+        }
+      }
+      
+      // 滚动到按钮位置并点击
+      if (buttonCount > 0) {
+        // 先滚动到页面底部确保按钮可见
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(500);
+        
+        // 使用 evaluate 滚动按钮到可视区域
+        await publishButton.first().evaluate((btn) => {
+          btn.scrollIntoView({ block: 'center' });
+        });
+        await page.waitForTimeout(500);
+        
+        // 点击按钮
+        await publishButton.first().click();
+        console.log(`[发布流程] 已点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
+        
+        // 等待跳转至管理页 (与 Python 一致)
+        try {
+          // 等待 URL 变化到管理页面，最多等待 3 秒
+          const currentUrl = page.url();
+          let redirected = false;
+          const waitStart = Date.now();
+          
+          while (Date.now() - waitStart < 3000) {
+            const newUrl = page.url();
+            if (newUrl.includes("/content/manage")) {
+              redirected = true;
+              console.log(`✓ [发布流程] 视频发布成功!`);
+              return true;
+            }
+            await page.waitForTimeout(500);
+          }
+          
+          if (!redirected) {
+            console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
+          }
         } catch (e) {
+          // URL 没有变化，检查是否有错误提示需要处理
           console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
-          await handleAutoVideoCover(page);
+          
+          // 处理封面问题 (与 Python handle_auto_video_cover 一致)
+          const coverHandled = await handleAutoVideoCover(page);
+          if (coverHandled) {
+            console.log(`  [-] 已处理封面问题，尝试再次发布...`);
+            continue;
+          }
+          
+          // 检查其他可能的错误
+          const errorTexts = await page.locator('text="请设置封面后再发布"').count();
+          if (errorTexts > 0) {
+            console.log(`  [-] 检测到需要设置封面`);
+          }
         }
       } else {
         console.log(`⚠ [发布流程] 未找到发布按钮`);
-        return false;
       }
     } catch (error) {
       console.log(`[发布流程] 尝试失败: ${(error as Error).message}`);
@@ -563,6 +635,8 @@ async function publishVideo(page: Page) {
     attempts++;
     await page.waitForTimeout(2000);
   }
+  
+  console.log(`⚠ [发布流程] 发布失败，已达到最大尝试次数`);
   return false;
 }
 
@@ -612,8 +686,8 @@ async function main() {
       await performDouyinTasks(stagehand, page, videoPath);
     }
 
-    console.log(`\n任务执行完成，浏览器将保持打开 30 秒...`);
-    await page.waitForTimeout(30000);
+    console.log(`\n任务执行完成，浏览器将保持打开 10 秒...`);
+    await page.waitForTimeout(10000);
 
   } catch (error) {
     console.error("发生错误:", error);
