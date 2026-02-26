@@ -137,6 +137,10 @@ async function uploadVideoToDouyin(page: Page, videoPath: string) {
   console.log(`\n[上传流程] 正在打开上传页面...`);
   await page.goto("https://creator.douyin.com/creator-micro/content/upload", { waitUntil: 'domcontentloaded', timeout: 60000 });
   
+  // 滚动到页面顶部，确保上传区域可见
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(1000);
+  
   console.log(`[上传流程] 准备上传视频: ${videoPath}`);
   try {
     // 等待上传按钮或 input 出现
@@ -165,6 +169,8 @@ async function uploadVideoToDouyin(page: Page, videoPath: string) {
     }
 
     if (success) {
+      // 不在这里等待上传完成，而是返回让 fillVideoDetails 在填写详情的同时等待上传
+      console.log(`✓ [上传流程] 已进入发布页面，准备填写详情`);
       return true;
     } else {
       console.log(`⚠ [上传流程] 超时未检测到发布页面跳转`);
@@ -178,6 +184,86 @@ async function uploadVideoToDouyin(page: Page, videoPath: string) {
 }
 
 /**
+ * 等待视频上传完成（与 Python debug/main.py 逻辑一致）
+ * 判断依据：检测"重新上传"按钮是否出现
+ */
+async function waitForVideoUploadComplete(page: Page, timeout: number = 60000): Promise<boolean> {
+  console.log(`  [-] 等待视频上传完成...`);
+  const startTime = Date.now();
+  
+  while (Date.now() - startTime < timeout) {
+    try {
+      // 向上翻一屏，检查"重新上传"按钮（与 Python 逻辑一致）
+      await page.evaluate(() => {
+        // 向上滚动一屏的距离
+        window.scrollBy(0, -window.innerHeight);
+      });
+      await page.waitForTimeout(500);
+      
+      // 方法1：使用 Python 相同的 CSS 选择器
+      let number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
+      
+      // 方法2：如果方法1失败，尝试更通用的选择器
+      if (number === 0) {
+        number = await page.locator('div:has-text("重新上传")').count();
+      }
+      
+      // 方法3：使用 text= 定位器（Playwright 推荐方式）
+      if (number === 0) {
+        number = await page.locator('text="重新上传"').count();
+      }
+      
+      // 方法4：检查页面中是否包含"重新上传"文本
+      if (number === 0) {
+        const pageText = await page.content();
+        if (pageText.includes('重新上传')) {
+          number = 1; // 文本存在，认为上传完成
+          console.log(`  [-] 通过页面文本检测到"重新上传"`);
+        }
+      }
+      
+      if (number > 0) {
+        console.log(`  ✓ 视频上传完毕 (检测到 ${number} 个元素)`);
+        return true;
+      }
+      
+      // 检查是否上传失败 - 使用更可靠的方式
+      const progressDiv = await page.locator('.progress-div, [class*="progress"]').count();
+      if (progressDiv > 0) {
+        const failedText = await page.locator('text="上传失败"').count();
+        if (failedText > 0) {
+          console.log(`  ✗ 发现上传失败提示，准备重试...`);
+          return false;
+        }
+      }
+      
+      console.log(`  [-] 正在上传视频中...`);
+      await page.waitForTimeout(2000);
+    } catch (e) {
+      console.log(`  [-] 正在上传视频中...`);
+      await page.waitForTimeout(2000);
+    }
+  }
+  
+  console.log(`  ✗ 等待上传完成超时 (${timeout}ms)`);
+  return false;
+}
+
+/**
+ * 处理上传失败，重新上传视频
+ */
+async function handleUploadError(page: Page, videoPath: string): Promise<boolean> {
+  console.log(`  [-] 视频出错了，重新上传中...`);
+  try {
+    await page.locator('div.progress-div [class^="upload-btn-input"]').setInputFiles(videoPath);
+    return await waitForVideoUploadComplete(page);
+  } catch (e) {
+    console.log(`  ✗ 重新上传失败: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+/**
  * 填充视频详情（标题、话题、简介等）
  * 改进版本：使用多种策略来识别和填充"作品简介"输入框
  */
@@ -185,7 +271,7 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
   console.log(`\n[详情流程] 正在分析页面并填充详情...`);
   
   try {
-    await page.waitForTimeout(10000); // 等待页面加载稳定
+    await page.waitForTimeout(1000); // 短暂等待页面加载（与 Python 一边上传一边填详情）
 
     // 0. 先截图保存当前页面状态用于调试
     await page.screenshot({ path: './debug/debug_page_state.png' });
@@ -301,23 +387,32 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
       console.log("  [-] Stagehand 填充标题失败，继续下一步");
     }
 
-    // 7. 等待视频上传完成
-    console.log(`[详情流程] 等待视频上传完成...`);
-    const startTime = Date.now();
-    while (Date.now() - startTime < 120000) {
-      const uploadFinished = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
-      if (uploadFinished > 0) {
-        console.log("✓ [详情流程] 视频上传完毕");
-        return true;
+    // 7. 视频上传完成检查已移至 uploadVideoToDouyin 函数
+    // 这里做双重保险检查，确保上传已完成
+    let uploadCheck = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
+    
+    // 备用检测方法
+    if (uploadCheck === 0) {
+      uploadCheck = await page.locator('div:has-text("重新上传")').count();
+    }
+    if (uploadCheck === 0) {
+      uploadCheck = await page.locator('text="重新上传"').count();
+    }
+    if (uploadCheck === 0) {
+      const pageText = await page.content();
+      if (pageText.includes('重新上传')) {
+        uploadCheck = 1;
       }
-      
-      const isFailed = await page.locator('div.progress-div > div:has-text("上传失败")').count();
-      if (isFailed > 0) {
-        throw new Error("视频上传失败");
+    }
+    
+    if (uploadCheck === 0) {
+      console.log(`  [-] 检测到视频可能还在上传中，等待完成...`);
+      const uploadComplete = await waitForVideoUploadComplete(page);
+      if (!uploadComplete) {
+        throw new Error("视频上传未完成，无法继续");
       }
-      
-      await page.waitForTimeout(3000);
-      console.log("  - 视频正在上传中...");
+    } else {
+      console.log(`  ✓ 视频已上传完毕 (检测到 ${uploadCheck} 个元素)`);
     }
     
     return true;
@@ -397,11 +492,42 @@ async function handleAutoVideoCover(page: Page) {
 async function publishVideo(page: Page) {
   console.log(`\n[发布流程] 准备发布视频...`);
   
+  // 滚动到页面底部查找发布按钮
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(1000);
+  
   let attempts = 0;
   while (attempts < 5) {
     try {
-      const publishButton = page.locator('button:has-text("发布")').first();
+      // 使用精确匹配（与 Python 一致）
+      let publishButton = page.locator('button:has-text("发布")').first();
+      
+      // 尝试多种选择器
+      let buttonCount = await publishButton.count();
+      if (buttonCount === 0) {
+        // 尝试查找所有按钮
+        publishButton = page.locator('button').first();
+        buttonCount = await page.locator('button').count();
+        console.log(`  [-] 页面共有 ${buttonCount} 个按钮，尝试查找第一个按钮`);
+      }
+      
+      // 调试：保存页面截图
+      await page.screenshot({ path: './debug/publish_page_state.png' });
+      console.log(`  [-] 已保存发布页面截图`);
+      
+      // 使用 evaluate 来滚动（兼容 Stagehand）
+      await page.evaluate(() => {
+        const btn = document.querySelector('button');
+        if (btn) btn.scrollIntoView({ block: 'center' });
+      });
+      await page.waitForTimeout(500);
       if (await publishButton.count() > 0) {
+        // 确保按钮可见 - 使用 evaluate 方式
+        await page.evaluate(() => {
+          const btns = document.querySelectorAll('button');
+          if (btns.length > 0) btns[0].scrollIntoView({ block: 'center' });
+        });
+        await page.waitForTimeout(500);
         await publishButton.click();
         console.log(`[发布流程] 已点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
         

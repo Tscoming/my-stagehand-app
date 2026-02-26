@@ -139,5 +139,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
 
-upload/
-debug_page_state.png
+upload/ 
+*/*.png
+debug/main.py
