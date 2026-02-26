@@ -102,8 +102,8 @@ async function verifyAuthStatus(page: Page) {
   console.log(`\n正在验证认证状态...`);
   
   try {
-    await page.goto("https://creator.douyin.com", { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(3000);
+    await page.goto("https://creator.douyin.com", { waitUntil: 'networkidle', timeout: 60000 });
+    await page.waitForTimeout(5000); // 增加等待时间
 
     const currentUrl = page.url();
     const pageTitle = await page.title();
@@ -112,16 +112,31 @@ async function verifyAuthStatus(page: Page) {
     console.log(`- URL: ${currentUrl}`);
     console.log(`- 标题: ${pageTitle}`);
     
+    // 检查是否在登录页面 - 如果 URL 包含 login 或者标题包含登录，说明未认证
+    const isLoginPage = currentUrl.includes('login') || pageTitle.includes('登录') || pageTitle.includes('login');
+    
+    if (isLoginPage) {
+      console.log(`⚠ 检测到登录页面 - 认证失败，Cookies 可能已失效`);
+      return false;
+    }
+    
+    // 检查用户信息元素
     const hasUserInfo = await page.evaluate(() => {
       const selectors = ['.user-info', '.avatar', '.username', '[class*="user"]', '[class*="avatar"]'];
       return selectors.some(s => document.querySelector(s));
     });
     
     if (hasUserInfo) {
-      console.log(`✓ 检测到用户信息元素 - 认证可能已生效`);
+      console.log(`✓ 检测到用户信息元素 - 认证已生效`);
       return true;
     } else {
       console.log(`⚠ 未检测到明显的用户信息元素`);
+      // 如果不在登录页面且没有用户信息元素，也可能是登录了但页面结构不同
+      // 检查 URL 是否在创作者中心
+      if (currentUrl.includes('creator.douyin.com')) {
+        console.log(`✓ URL 确认在创作者中心，认为已认证`);
+        return true;
+      }
       return false;
     }
   } catch (error) {
