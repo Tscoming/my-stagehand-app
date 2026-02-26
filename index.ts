@@ -3,12 +3,15 @@ import { Stagehand } from "@browserbasehq/stagehand";
 import { readFileSync } from "fs";
 import { join } from "path";
 import type { Page } from "playwright";
+import { chromium } from "playwright";
+import * as fs from "fs";
 
 // 设置终端输出编码为 UTF-8 (Windows)
 if (process.platform === "win32") {
   process.stdout.setDefaultEncoding("utf-8");
   process.stderr.setDefaultEncoding("utf-8");
 }
+
 
 /**
  * 初始化 Stagehand 实例
@@ -29,6 +32,71 @@ async function initStagehand() {
   console.log(`Stagehand Session Started (Local Browser)`);
   return stagehand;
 }
+
+/**
+ * 验证 Cookie 是否有效
+ * 对应 Python 的 cookie_auth 函数
+ */
+async function cookieAuth(accountFile: string): Promise<boolean> {
+  console.log("[+] 正在验证 Cookie 有效性...");
+
+
+  if (!fs.existsSync(accountFile)) {
+    console.log("[-] Cookie 文件不存在");
+    return false;
+  }
+
+  const browser = await chromium.launch({ headless: false });
+  const context = await browser.newContext({
+    storageState: accountFile,
+  });
+
+  const page = await context.newPage();
+
+  try {
+    await page.goto("https://creator.douyin.com/creator-micro/content/upload", {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
+
+    // 等待页面加载
+    await page.waitForTimeout(3000);
+
+    // 获取当前 URL
+    const currentUrl = page.url();
+    console.log("[+] 当前 URL:", currentUrl);
+
+    // 打印页面标题
+    const title = await page.title();
+    console.log("[+] 页面标题:", title);
+
+    // 检查是否存在"手机号登录"或"扫码登录"文本
+    // 使用 filter({ hasText: ... }) 来查找这些元素
+    const phoneLoginVisible = await page.getByText("手机号登录").first().isVisible().catch(() => false);
+    const scanLoginVisible = await page.getByText("扫码登录").first().isVisible().catch(() => false);
+
+    console.log("[+] 手机号登录 是否可见:", phoneLoginVisible);
+    console.log("[+] 扫码登录 是否可见:", scanLoginVisible);
+
+    // 如果"手机号登录"或"扫码登录"可见，说明需要登录，Cookie 失效
+    if (phoneLoginVisible || scanLoginVisible) {
+      console.log("[-] Cookie 已失效，需要重新登录");
+      await context.close();
+      await browser.close();
+      return false;
+    }
+
+    console.log("[+] Cookie 有效");
+    await context.close();
+    await browser.close();
+    return true;
+  } catch (error) {
+    console.log("[-] 验证过程出错:", (error as Error).message);
+    await browser.close();
+    return false;
+  }
+}
+
 
 /**
  * 加载并注入 Cookies
@@ -96,47 +164,22 @@ async function injectCookies(stagehand: Stagehand, cookiesPath: string): Promise
 }
 
 /**
- * 验证认证状态
+ * 验证认证状态 - 通过 Cookies 判断
  */
-async function verifyAuthStatus(page: Page) {
+async function verifyAuthStatus(accountFile: string) {
   console.log(`\n正在验证认证状态...`);
   
   try {
-    await page.goto("https://creator.douyin.com", { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(5000); // 增加等待时间
 
-    const currentUrl = page.url();
-    const pageTitle = await page.title();
-    
-    console.log(`当前页面信息:`);
-    console.log(`- URL: ${currentUrl}`);
-    console.log(`- 标题: ${pageTitle}`);
-    
-    // 检查是否在登录页面 - 如果 URL 包含 login 或者标题包含登录，说明未认证
-    const isLoginPage = currentUrl.includes('login') || pageTitle.includes('登录') || pageTitle.includes('login');
-    
-    if (isLoginPage) {
-      console.log(`⚠ 检测到登录页面 - 认证失败，Cookies 可能已失效`);
-      return false;
-    }
-    
-    // 检查用户信息元素
-    const hasUserInfo = await page.evaluate(() => {
-      const selectors = ['.user-info', '.avatar', '.username', '[class*="user"]', '[class*="avatar"]'];
-      return selectors.some(s => document.querySelector(s));
-    });
-    
-    if (hasUserInfo) {
-      console.log(`✓ 检测到用户信息元素 - 认证已生效`);
+    // 验证保存的 Cookie
+    console.log("\n[+] 正在验证保存的 Cookie...");
+    const isValid = await cookieAuth(accountFile);
+
+    if (isValid) {
+      console.log("[+] Cookie 验证通过！");
       return true;
     } else {
-      console.log(`⚠ 未检测到明显的用户信息元素`);
-      // 如果不在登录页面且没有用户信息元素，也可能是登录了但页面结构不同
-      // 检查 URL 是否在创作者中心
-      if (currentUrl.includes('creator.douyin.com')) {
-        console.log(`✓ URL 确认在创作者中心，认为已认证`);
-        return true;
-      }
+      console.log("[-] Cookie 验证失败，请重试");
       return false;
     }
   } catch (error) {
@@ -693,7 +736,7 @@ async function main() {
     const page = await injectCookies(stagehand, cookiesPath);
 
     // 2. 验证状态
-    const isAuthenticated = await verifyAuthStatus(page);
+    const isAuthenticated = await verifyAuthStatus(cookiesPath);
 
     if (isAuthenticated) {
       // 3. 执行任务
