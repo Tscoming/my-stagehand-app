@@ -140,7 +140,7 @@ vite.config.ts.timestamp-*
 
 
 upload/ 
-*/*.png
+**/*.png
 debug/main.py
 cookies/
 

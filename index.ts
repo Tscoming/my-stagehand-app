@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Stagehand } from "@browserbasehq/stagehand";
 import { readFileSync } from "fs";
 import { join } from "path";
-import type { Page } from "playwright";
+import type { Page, Browser, BrowserContext } from "playwright";
 import { chromium } from "playwright";
 import * as fs from "fs";
 
@@ -36,14 +36,15 @@ async function initStagehand() {
 /**
  * 验证 Cookie 是否有效
  * 对应 Python 的 cookie_auth 函数
+ * 返回值：验证通过时返回包含 browser, context, page 的对象，否则返回 null
  */
-async function cookieAuth(accountFile: string): Promise<boolean> {
+async function cookieAuth(accountFile: string): Promise<{ browser: Browser; context: BrowserContext; page: Page } | null> {
   console.log("[+] 正在验证 Cookie 有效性...");
 
 
   if (!fs.existsSync(accountFile)) {
     console.log("[-] Cookie 文件不存在");
-    return false;
+    return null;
   }
 
   const browser = await chromium.launch({ headless: false });
@@ -83,17 +84,16 @@ async function cookieAuth(accountFile: string): Promise<boolean> {
       console.log("[-] Cookie 已失效，需要重新登录");
       await context.close();
       await browser.close();
-      return false;
+      return null;
     }
 
     console.log("[+] Cookie 有效");
-    await context.close();
-    await browser.close();
-    return true;
+    // 返回 browser, context, page 对象
+    return { browser, context, page };
   } catch (error) {
     console.log("[-] 验证过程出错:", (error as Error).message);
     await browser.close();
-    return false;
+    return null;
   }
 }
 
@@ -166,25 +166,25 @@ async function injectCookies(stagehand: Stagehand, cookiesPath: string): Promise
 /**
  * 验证认证状态 - 通过 Cookies 判断
  */
-async function verifyAuthStatus(accountFile: string) {
+async function verifyAuthStatus(accountFile: string): Promise<{ browser: Browser; context: BrowserContext; page: Page } | null> {
   console.log(`\n正在验证认证状态...`);
-  
+
   try {
 
     // 验证保存的 Cookie
     console.log("\n[+] 正在验证保存的 Cookie...");
-    const isValid = await cookieAuth(accountFile);
+    const authResult = await cookieAuth(accountFile);
 
-    if (isValid) {
+    if (authResult != null) {
       console.log("[+] Cookie 验证通过！");
-      return true;
+      return authResult;
     } else {
-      console.log("[-] Cookie 验证失败，请重试");
-      return false;
+      console.log("[-] Cookie 验证失败");
+      return null;
     }
   } catch (error) {
     console.log(`验证认证状态时出错: ${error}`);
-    return false;
+    return null;
   }
 }
 
@@ -273,7 +273,7 @@ async function waitForVideoUploadComplete(page: Page, timeout: number = 60000): 
       
       // 方法4：检查页面中是否包含"重新上传"文本
       if (number === 0) {
-        const pageText = await page.content();
+        const pageText = await page.evaluate(() => document.documentElement.outerHTML);
         if (pageText.includes('重新上传')) {
           number = 1; // 文本存在，认为上传完成
           console.log(`  [-] 通过页面文本检测到"重新上传"`);
@@ -457,7 +457,7 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
       uploadCheck = await page.locator('text="重新上传"').count();
     }
     if (uploadCheck === 0) {
-      const pageText = await page.content();
+      const pageText = await page.evaluate(() => document.documentElement.outerHTML);
       if (pageText.includes('重新上传')) {
         uploadCheck = 1;
       }
@@ -699,12 +699,58 @@ async function publishVideo(page: Page) {
 }
 
 /**
+ * 验证视频文件是否存在且有效
+ */
+function validateVideoPath(videoPath: string): boolean {
+  console.log(`\n[验证流程] 检查视频文件: ${videoPath}`);
+  
+  // 1. 检查文件是否存在
+  if (!fs.existsSync(videoPath)) {
+    console.log(`[-] 视频文件不存在: ${videoPath}`);
+    return false;
+  }
+  
+  // 2. 检查是否为文件（不是目录）
+  const stats = fs.statSync(videoPath);
+  if (!stats.isFile()) {
+    console.log(`[-] 指定路径不是有效文件: ${videoPath}`);
+    return false;
+  }
+  
+  // 3. 检查文件大小（不能为空）
+  if (stats.size === 0) {
+    console.log(`[-] 视频文件大小为 0: ${videoPath}`);
+    return false;
+  }
+  
+  // 4. 检查文件扩展名是否为有效视频格式
+  const validExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv'];
+  const ext = videoPath.toLowerCase().substring(videoPath.lastIndexOf('.'));
+  if (!validExtensions.includes(ext)) {
+    console.log(`[-] 视频文件格式不支持: ${ext}，支持的格式: ${validExtensions.join(', ')}`);
+    return false;
+  }
+  
+  console.log(`[+] 视频文件验证通过`);
+  console.log(`    - 文件大小: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+  console.log(`    - 文件格式: ${ext}`);
+  
+  return true;
+}
+
+/**
  * 执行业务任务
  */
 async function performDouyinTasks(stagehand: Stagehand, page: Page, videoPath: string) {
-  const videoTitle = "可爱的小猫咪";
-  const videoDescription = "这是一只非常可爱的橘猫，它正在玩耍。"; // 新增简介参数
-  const videoTags = ["宠物", "萌宠"];
+  // 0. 验证视频文件
+  if (!validateVideoPath(videoPath)) {
+    console.log(`[-] 视频文件验证失败，任务终止`);
+    return;
+  }
+  
+  const videoTitle = "破风而行";
+  const videoDescription = "速度与激情。"; // 新增简介参数
+  const videoTags = ["宠物", "竞速"];
   // 如果有封面图，可以设置此路径
   const thumbnailPath = ""; 
 
@@ -727,32 +773,72 @@ async function performDouyinTasks(stagehand: Stagehand, page: Page, videoPath: s
 
 async function main() {
   let stagehand: Stagehand | undefined;
+  let page: Page | null = null;
+  let authResult: { browser: Browser; context: BrowserContext; page: Page } | null = null;
+  const videoPath = join(process.cwd(), "upload", "Nj2ZYQhUFaYRYriL.mp4");
+  // 0. 验证视频文件
+  if (!validateVideoPath(videoPath)) {
+    console.log(`[-] 视频文件验证失败，任务终止`);
+    return;
+  }
 
   try {
     stagehand = await initStagehand();
     const cookiesPath = join(process.cwd(), "cookies", "douyin.json");
 
     // 1. 注入 Cookie 并获取 page
-    const page = await injectCookies(stagehand, cookiesPath);
+    // const page = await injectCookies(stagehand, cookiesPath);
 
     // 2. 验证状态
-    const isAuthenticated = await verifyAuthStatus(cookiesPath);
+    // const isAuthenticated = await verifyAuthStatus(cookiesPath);
 
-    if (isAuthenticated) {
+    authResult = await cookieAuth(cookiesPath);
+
+    if (authResult != null) {
+      page = authResult.page;
       // 3. 执行任务
-      const videoPath = join(process.cwd(), "upload", "cat.mp4");
       await performDouyinTasks(stagehand, page, videoPath);
+
+      console.log(`\n任务执行完成，浏览器将保持打开 60 秒...`);
+      await page.waitForTimeout(10000);
+    } else {
+      console.log(`\n认证失败！`);
     }
 
-    console.log(`\n任务执行完成，浏览器将保持打开 10 秒...`);
-    await page.waitForTimeout(10000);
 
   } catch (error) {
     console.error("发生错误:", error);
   } finally {
+    // 优先关闭 authResult 中的浏览器资源
+    if (authResult) {
+      console.log(`\n关闭 cookieAuth 浏览器...`);
+      try {
+        await authResult.page.close();
+      } catch (e) { /* 忽略关闭错误 */ }
+      try {
+        await authResult.context.close();
+      } catch (e) { /* 忽略关闭错误 */ }
+      try {
+        await authResult.browser.close();
+      } catch (e) { /* 忽略关闭错误 */ }
+    }
+
+    // 关闭 Stagehand 浏览器
     if (stagehand) {
-      console.log(`\n关闭浏览器...`);
-      await stagehand.close();
+      console.log(`\n关闭 Stagehand 浏览器...`);
+
+      // 添加超时保护，防止 close() 方法卡住
+      const closeWithTimeout = async (ms: number) => {
+        return Promise.race([
+          stagehand.close() as Promise<void>,
+          new Promise<void>((resolve) => setTimeout(() => {
+            console.log(`⚠ 关闭浏览器超时 (${ms}ms)，强制结束...`);
+            resolve();
+          }, ms))
+        ]);
+      };
+
+      await closeWithTimeout(5000); // 5秒超时
     }
   }
 }
