@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Stagehand } from "@browserbasehq/stagehand";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { Page } from "playwright";
+import type { Page } from "playwright";
 
 // 设置终端输出编码为 UTF-8 (Windows)
 if (process.platform === "win32") {
@@ -102,7 +102,7 @@ async function verifyAuthStatus(page: Page) {
   console.log(`\n正在验证认证状态...`);
   
   try {
-    await page.goto("https://creator.douyin.com", { waitUntil: 'networkidle', timeout: 60000 });
+    await page.goto("https://creator.douyin.com", { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(5000); // 增加等待时间
 
     const currentUrl = page.url();
