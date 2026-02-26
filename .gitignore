@@ -142,3 +142,5 @@ vite.config.ts.timestamp-*
 upload/ 
 */*.png
 debug/main.py
+cookies/
+
