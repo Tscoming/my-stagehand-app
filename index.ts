@@ -99,7 +99,19 @@ async function cookieAuth(accountFile: string): Promise<{ browser: Browser; cont
     return null;
   }
 
-  const browser = await chromium.launch({ headless: false });
+  // 无头模式配置：通过 HEADLESS 环境变量控制，默认为 false（有头模式）
+  const isHeadless = process.env.HEADLESS === "true";
+  console.log(`[*] 浏览器模式: ${isHeadless ? "无头模式" : "有头模式"}`);
+
+  const browser = await chromium.launch({ 
+    headless: isHeadless,
+    args: isHeadless ? [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled'
+    ] : []
+  });
   const context = await browser.newContext({
     storageState: accountFile,
   });
