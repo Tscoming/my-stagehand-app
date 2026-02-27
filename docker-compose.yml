@@ -17,7 +17,18 @@ services:
       - ./debug:/app/debug
       # 持久化上传的文件
       - ./upload:/app/upload
-    # 无头模式运行 Chromium (生产环境推荐)
+    # 环境变量配置
+    environment:
+      # 浏览器模式: "true" = 无头模式, "false" = 有头模式 (通过 Xvfb 运行)
+      # 默认使用有头模式 + Xvfb 方案
+      - HEADLESS=false
+      # Xvfb 虚拟显示配置
+      - DISPLAY=:99
+      - XVFB_WHD=1920x1080x24
+      # Node 环境
+      - NODE_ENV=production
+    # 使用 entrypoint 脚本启动 (自动启动 Xvfb)
+    entrypoint: ["/docker-entrypoint.sh"]
     restart: unless-stopped
     # 针对 Playwright/Chromium 的额外配置
     shm_size: '2gb'

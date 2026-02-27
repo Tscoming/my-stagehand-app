@@ -103,16 +103,32 @@ async function cookieAuth(accountFile: string): Promise<{ browser: Browser; cont
 
   // 无头模式配置：通过 HEADLESS 环境变量控制，默认为 false（有头模式）
   const isHeadless = process.env.HEADLESS === "true";
+  // 检测是否在 Docker 环境中运行
+  const isDocker = process.env.DOCKER_CONTAINER === "true" || 
+                   process.env.IN_DOCKER_CONTAINER === "true" ||
+                   fs.existsSync("/.dockerenv");
+  // 检测 DISPLAY 环境变量是否已设置（Xvfb 方案）
+  const hasDisplay = !!process.env.DISPLAY;
+
   console.log(`[*] 浏览器模式: ${isHeadless ? "无头模式" : "有头模式"}`);
+  console.log(`[*] Docker 环境: ${isDocker ? "是" : "否"}`);
+  console.log(`[*] Xvfb 显示: ${hasDisplay ? `DISPLAY=${process.env.DISPLAY}` : "未配置"}`);
+
+  // 在 Docker 环境中使用 Xvfb 时，有头模式实际上是通过虚拟显示运行
+  // Chromium 需要特殊参数来处理 Docker + Xvfb 环境
+  const isDockerWithXvfb = isDocker && hasDisplay && !isHeadless;
 
   // 注意：无头模式下使用 playwright-stealth 插件
   // 如果不需要可以注释掉下面这行
   // @ts-ignore
   // playwright.use(stealth());
 
-  const browser = await playwright.chromium.launch({
-    headless: isHeadless,
-    args: isHeadless ? [
+  // 构建浏览器启动参数
+  const browserArgs: string[] = [];
+
+  if (isHeadless) {
+    // 无头模式参数
+    browserArgs.push(
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -163,7 +179,35 @@ async function cookieAuth(accountFile: string): Promise<{ browser: Browser; cont
       '--disable-low-res-tiling',
       '--log-level=3',
       '--silent-debugger-extension-api',
-    ] : []
+    );
+  } else if (isDockerWithXvfb) {
+    // Docker + Xvfb 有头模式参数
+    console.log(`[*] 使用 Docker + Xvfb 有头模式配置`);
+    browserArgs.push(
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--window-size=1920,1080',
+      // Xvfb 特定参数
+      '--disable-features=TranslateUI',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--disable-sync',
+      '--disable-translate',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-first-run',
+      '--safebrowsing-disable-auto-update',
+    );
+  }
+
+  const browser = await playwright.chromium.launch({
+    headless: isHeadless,
+    args: browserArgs,
+    // 当使用 Xvfb 时，env 需要包含 DISPLAY
+    env: isDockerWithXvfb ? { ...process.env } : undefined,
   });
 
   const context = await browser.newContext({

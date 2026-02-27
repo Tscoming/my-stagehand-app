@@ -4,13 +4,26 @@ FROM node:20-slim
 # 设置环境变量
 ENV NODE_ENV=production \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+    # Xvfb 虚拟显示配置
+    DISPLAY=:99 \
+    XVFB_WHD=1920x1080x24
 
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖和 Chromium 浏览器
+# 安装系统依赖、Xvfb 和 Chromium 浏览器
 RUN apt-get update && apt-get install -y \
+    # Xvfb (虚拟帧缓冲区) - 用于在无显示器环境中运行有头浏览器
+    xvfb \
+    # X11 相关库
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxext6 \
+    libxrender1 \
+    libxtst6 \
+    libxi6 \
     # Chromium 浏览器依赖
     chromium \
     chromium-sandbox \
@@ -67,5 +80,9 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD node -e "require('http').get('http://localhost:3000/health', (res) => {process.exit(res.statusCode === 200 ? 0 : 1)})"
 
+# 复制启动脚本
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 # 启动应用
-CMD ["npm", "start"]
+CMD ["/docker-entrypoint.sh"]
