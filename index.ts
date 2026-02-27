@@ -1,10 +1,13 @@
 import "dotenv/config";
 import { Stagehand } from "@browserbasehq/stagehand";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { readFileSync, existsSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
 import type { Page, Browser, BrowserContext } from "playwright";
 import { chromium } from "playwright";
 import * as fs from "fs";
+import express from "express";
+import multer from "multer";
+import cors from "cors";
 
 // 设置终端输出编码为 UTF-8 (Windows)
 if (process.platform === "win32") {
@@ -12,10 +15,62 @@ if (process.platform === "win32") {
   process.stderr.setDefaultEncoding("utf-8");
 }
 
+// =====================
+// Express 服务器配置
+// =====================
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-/**
- * 初始化 Stagehand 实例
- */
+// 中间件
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// 配置 multer 用于文件上传
+const uploadDir = join(process.cwd(), "upload");
+if (!existsSync(uploadDir)) {
+  mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + "-" + file.originalname);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 500 * 1024 * 1024, // 500MB 限制
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"];
+    const ext = file.originalname.toLowerCase().substring(file.originalname.lastIndexOf("."));
+    if (allowedTypes.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`不支持的文件格式: ${ext}`));
+    }
+  }
+});
+
+// =====================
+// 视频信息数据类型
+// =====================
+interface VideoInfo {
+  filename: string;
+  title: string;
+  description: string;
+  tags: string[];
+}
+
+// =====================
+// 初始化 Stagehand 实例
+// =====================
 async function initStagehand() {
   const stagehand = new Stagehand({
     env: "LOCAL",
@@ -33,14 +88,11 @@ async function initStagehand() {
   return stagehand;
 }
 
-/**
- * 验证 Cookie 是否有效
- * 对应 Python 的 cookie_auth 函数
- * 返回值：验证通过时返回包含 browser, context, page 的对象，否则返回 null
- */
+// =====================
+// 验证 Cookie 是否有效
+// =====================
 async function cookieAuth(accountFile: string): Promise<{ browser: Browser; context: BrowserContext; page: Page } | null> {
   console.log("[+] 正在验证 Cookie 有效性...");
-
 
   if (!fs.existsSync(accountFile)) {
     console.log("[-] Cookie 文件不存在");
@@ -60,26 +112,20 @@ async function cookieAuth(accountFile: string): Promise<{ browser: Browser; cont
       timeout: 30000,
     });
 
-    // 等待页面加载
     await page.waitForTimeout(3000);
 
-    // 获取当前 URL
     const currentUrl = page.url();
     console.log("[+] 当前 URL:", currentUrl);
 
-    // 打印页面标题
     const title = await page.title();
     console.log("[+] 页面标题:", title);
 
-    // 检查是否存在"手机号登录"或"扫码登录"文本
-    // 使用 filter({ hasText: ... }) 来查找这些元素
     const phoneLoginVisible = await page.getByText("手机号登录").first().isVisible().catch(() => false);
     const scanLoginVisible = await page.getByText("扫码登录").first().isVisible().catch(() => false);
 
     console.log("[+] 手机号登录 是否可见:", phoneLoginVisible);
     console.log("[+] 扫码登录 是否可见:", scanLoginVisible);
 
-    // 如果"手机号登录"或"扫码登录"可见，说明需要登录，Cookie 失效
     if (phoneLoginVisible || scanLoginVisible) {
       console.log("[-] Cookie 已失效，需要重新登录");
       await context.close();
@@ -88,7 +134,6 @@ async function cookieAuth(accountFile: string): Promise<{ browser: Browser; cont
     }
 
     console.log("[+] Cookie 有效");
-    // 返回 browser, context, page 对象
     return { browser, context, page };
   } catch (error) {
     console.log("[-] 验证过程出错:", (error as Error).message);
@@ -97,23 +142,21 @@ async function cookieAuth(accountFile: string): Promise<{ browser: Browser; cont
   }
 }
 
-
-/**
- * 加载并注入 Cookies
- */
+// =====================
+// 加载并注入 Cookies
+// =====================
 async function injectCookies(stagehand: Stagehand, cookiesPath: string): Promise<Page> {
   const cookiesData = JSON.parse(readFileSync(cookiesPath, "utf-8"));
-  
+
   console.log(`Loading cookies from: ${cookiesPath}`);
   console.log(`Total cookies to load: ${cookiesData.cookies.length}`);
-  
-  // 确保 page 对象已初始化
+
   let page = stagehand.page as unknown as Page;
   if (!page) {
     console.log("Page not found, creating new page via context...");
     // @ts-ignore
     const context = stagehand.context;
-    if (context && typeof context.newPage === 'function') {
+    if (context && typeof context.newPage === "function") {
       page = await context.newPage();
     } else {
       console.log("Context not found or newPage not available, using act to initialize...");
@@ -131,10 +174,9 @@ async function injectCookies(stagehand: Stagehand, cookiesPath: string): Promise
   }
 
   try {
-    // 检查 Stagehand 的 context
     // @ts-ignore
     const context = stagehand.context;
-    if (context && typeof context.addCookies === 'function') {
+    if (context && typeof context.addCookies === "function") {
       await context.addCookies(cookiesData.cookies);
       console.log(`✓ Cookies added successfully via stagehand.context.addCookies`);
       return page;
@@ -142,15 +184,20 @@ async function injectCookies(stagehand: Stagehand, cookiesPath: string): Promise
     throw new Error(`Context method unavailable`);
   } catch (e) {
     console.log(`Context method failed (${(e as Error).message}), trying document.cookie fallback...`);
-    
+
     try {
-      await page.goto("https://creator.douyin.com", { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.goto("https://creator.douyin.com", { waitUntil: "domcontentloaded", timeout: 60000 });
       for (const cookie of cookiesData.cookies) {
         try {
-          await page.evaluate(({name, value, domain, path, expires, secure, sameSite}) => {
-            const cookieString = `${name}=${value}; domain=${domain}; path=${path}; ${expires ? `expires=${new Date(expires * 1000).toUTCString()};` : ''} ${secure ? 'secure;' : ''} samesite=${sameSite || 'Lax'}`;
-            document.cookie = cookieString;
-          }, cookie);
+          await page.evaluate(
+            ({ name, value, domain, path, expires, secure, sameSite }) => {
+              const cookieString = `${name}=${value}; domain=${domain}; path=${path}; ${
+                expires ? `expires=${new Date(expires * 1000).toUTCString()};` : ""
+              } ${secure ? "secure;" : ""} samesite=${sameSite || "Lax"}`;
+              document.cookie = cookieString;
+            },
+            cookie
+          );
         } catch (err) {
           // 忽略单个 cookie 注入错误
         }
@@ -163,15 +210,13 @@ async function injectCookies(stagehand: Stagehand, cookiesPath: string): Promise
   return page;
 }
 
-/**
- * 验证认证状态 - 通过 Cookies 判断
- */
+// =====================
+// 验证认证状态
+// =====================
 async function verifyAuthStatus(accountFile: string): Promise<{ browser: Browser; context: BrowserContext; page: Page } | null> {
   console.log(`\n正在验证认证状态...`);
 
   try {
-
-    // 验证保存的 Cookie
     console.log("\n[+] 正在验证保存的 Cookie...");
     const authResult = await cookieAuth(accountFile);
 
@@ -188,20 +233,21 @@ async function verifyAuthStatus(accountFile: string): Promise<{ browser: Browser
   }
 }
 
-/**
- * 专门负责视频上传的过程
- */
+// =====================
+// 视频上传核心函数
+// =====================
 async function uploadVideoToDouyin(page: Page, videoPath: string) {
   console.log(`\n[上传流程] 正在打开上传页面...`);
-  await page.goto("https://creator.douyin.com/creator-micro/content/upload", { waitUntil: 'domcontentloaded', timeout: 60000 });
-  
-  // 滚动到页面顶部，确保上传区域可见
+  await page.goto("https://creator.douyin.com/creator-micro/content/upload", {
+    waitUntil: "domcontentloaded",
+    timeout: 60000,
+  });
+
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(1000);
-  
+
   console.log(`[上传流程] 准备上传视频: ${videoPath}`);
   try {
-    // 等待上传按钮或 input 出现
     const uploadSelector = "div[class^='container'] input";
     try {
       await page.waitForSelector(uploadSelector, { timeout: 10000 });
@@ -210,10 +256,9 @@ async function uploadVideoToDouyin(page: Page, videoPath: string) {
       console.log(`[上传流程] 默认选择器失败，尝试通用 input[type="file"]...`);
       await page.setInputFiles('input[type="file"]', videoPath);
     }
-    
+
     console.log(`✓ [上传流程] 已成功选择视频文件，等待跳转至发布页面...`);
 
-    // 等待页面跳转 (循环检查 URL)
     let success = false;
     const startTime = Date.now();
     while (Date.now() - startTime < 60000) {
@@ -227,7 +272,6 @@ async function uploadVideoToDouyin(page: Page, videoPath: string) {
     }
 
     if (success) {
-      // 不在这里等待上传完成，而是返回让 fillVideoDetails 在填写详情的同时等待上传
       console.log(`✓ [上传流程] 已进入发布页面，准备填写详情`);
       return true;
     } else {
@@ -241,51 +285,43 @@ async function uploadVideoToDouyin(page: Page, videoPath: string) {
   }
 }
 
-/**
- * 等待视频上传完成（与 Python debug/main.py 逻辑一致）
- * 判断依据：检测"重新上传"按钮是否出现
- */
+// =====================
+// 等待视频上传完成
+// =====================
 async function waitForVideoUploadComplete(page: Page, timeout: number = 60000): Promise<boolean> {
   console.log(`  [-] 等待视频上传完成...`);
   const startTime = Date.now();
-  
+
   while (Date.now() - startTime < timeout) {
     try {
-      // 向上翻一屏，检查"重新上传"按钮（与 Python 逻辑一致）
       await page.evaluate(() => {
-        // 向上滚动一屏的距离
         window.scrollBy(0, -window.innerHeight);
       });
       await page.waitForTimeout(500);
-      
-      // 方法1：使用 Python 相同的 CSS 选择器
+
       let number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
-      
-      // 方法2：如果方法1失败，尝试更通用的选择器
+
       if (number === 0) {
         number = await page.locator('div:has-text("重新上传")').count();
       }
-      
-      // 方法3：使用 text= 定位器（Playwright 推荐方式）
+
       if (number === 0) {
         number = await page.locator('text="重新上传"').count();
       }
-      
-      // 方法4：检查页面中是否包含"重新上传"文本
+
       if (number === 0) {
         const pageText = await page.evaluate(() => document.documentElement.outerHTML);
-        if (pageText.includes('重新上传')) {
-          number = 1; // 文本存在，认为上传完成
+        if (pageText.includes("重新上传")) {
+          number = 1;
           console.log(`  [-] 通过页面文本检测到"重新上传"`);
         }
       }
-      
+
       if (number > 0) {
         console.log(`  ✓ 视频上传完毕 (检测到 ${number} 个元素)`);
         return true;
       }
-      
-      // 检查是否上传失败 - 使用更可靠的方式
+
       const progressDiv = await page.locator('.progress-div, [class*="progress"]').count();
       if (progressDiv > 0) {
         const failedText = await page.locator('text="上传失败"').count();
@@ -294,7 +330,7 @@ async function waitForVideoUploadComplete(page: Page, timeout: number = 60000): 
           return false;
         }
       }
-      
+
       console.log(`  [-] 正在上传视频中...`);
       await page.waitForTimeout(2000);
     } catch (e) {
@@ -302,14 +338,14 @@ async function waitForVideoUploadComplete(page: Page, timeout: number = 60000): 
       await page.waitForTimeout(2000);
     }
   }
-  
+
   console.log(`  ✗ 等待上传完成超时 (${timeout}ms)`);
   return false;
 }
 
-/**
- * 处理上传失败，重新上传视频
- */
+// =====================
+// 处理上传失败
+// =====================
 async function handleUploadError(page: Page, videoPath: string): Promise<boolean> {
   console.log(`  [-] 视频出错了，重新上传中...`);
   try {
@@ -321,45 +357,34 @@ async function handleUploadError(page: Page, videoPath: string): Promise<boolean
   }
 }
 
-/**
- * 填充视频详情（标题、话题、简介等）
- * 改进版本：使用多种策略来识别和填充"作品简介"输入框
- */
+// =====================
+// 填充视频详情
+// =====================
 async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string, description: string, tags: string[]) {
   console.log(`\n[详情流程] 正在分析页面并填充详情...`);
-  
-  try {
-    await page.waitForTimeout(1000); // 短暂等待页面加载（与 Python 一边上传一边填详情）
 
-    // 0. 先截图保存当前页面状态用于调试
-    await page.screenshot({ path: './debug/debug_page_state.png' });
+  try {
+    await page.waitForTimeout(1000);
+
+    await page.screenshot({ path: "./debug/debug_page_state.png" });
     console.log("  [-] 已保存页面截图到 ./debug/debug_page_state.png");
 
-    // 1. 尝试使用 Playwright 原生选择器直接定位作品简介输入框
     console.log("  [-] 尝试使用多种选择器定位作品简介输入框...");
-    
-    // 抖音作品简介可能的多种选择器
+
     const descriptionSelectors = [
-      // 包含"简介"关键词的 textarea
       'textarea[placeholder*="简介"]',
       'textarea[data-placeholder*="简介"]',
-      // 包含"简介"关键词的 div (contenteditable)
       'div[contenteditable="true"][data-placeholder*="简介"]',
       'div[contenteditable="true"][placeholder*="简介"]',
-      // 根据 aria-label 或 data-placeholder
       '[data-placeholder="添加作品简介"]',
       '[data-placeholder="输入作品简介"]',
       'textarea[aria-label*="简介"]',
-      // 通用 contenteditable 区域（通常简介是较大的编辑器）
-      'div.notranslate[contenteditable="true"]',
+      "div.notranslate[contenteditable='true']",
       '.zone-container[contenteditable="true"]',
-      // 查找包含"简介"文本的元素附近的输入区域
       'div[class*="description"]',
       'div[class*="intro"]',
-      // 更通用的：查找作品描述区块内的输入框
       '[class*="desc-container"] textarea',
       '[class*="description"] textarea',
-      // 可能的无障碍属性
       'input[aria-describedby*="简介"]',
     ];
 
@@ -373,86 +398,69 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
       }
     }
 
-    // 2. 同时获取页面上的所有输入框信息用于调试
     const allInputsInfo = await page.evaluate(() => {
       const inputs: any[] = [];
-      
-      // 获取所有 input, textarea, contenteditable 元素
-      document.querySelectorAll('input, textarea, [contenteditable="true"]').forEach((el, idx) => {
+
+      document.querySelectorAll("input, textarea, [contenteditable='true']").forEach((el, idx) => {
         const input = el as HTMLElement;
         inputs.push({
           index: idx,
           tagName: input.tagName,
           className: input.className,
           id: input.id,
-          placeholder: input.getAttribute('placeholder'),
-          'data-placeholder': input.getAttribute('data-placeholder'),
-          contenteditable: input.getAttribute('contenteditable'),
-          ariaLabel: input.getAttribute('aria-label'),
+          placeholder: input.getAttribute("placeholder"),
+          "data-placeholder": input.getAttribute("data-placeholder"),
+          contenteditable: input.getAttribute("contenteditable"),
+          ariaLabel: input.getAttribute("aria-label"),
           textContent: input.textContent?.substring(0, 50),
         });
       });
       return inputs;
     });
-    
+
     console.log("  [-] 页面输入元素分析:", JSON.stringify(allInputsInfo, null, 2));
 
-    // 3. 如果找到了描述输入框，直接使用 Playwright 填充
     if (descriptionLocator) {
       console.log("  [-] 使用 Playwright 直接填充作品简介...");
       await descriptionLocator.click();
-      // 每个tag前加#号并且用空格分隔开形成一个新的字符串
-      const descriptionPlus = description + "\n" + tags.map(tag => `#${tag}`).join(" ");
-      
+      const descriptionPlus = description + "\n" + tags.map((tag) => `#${tag}`).join(" ");
+
       await descriptionLocator.fill(descriptionPlus);
       console.log("  ✓ 作品简介已填充");
     } else {
-      // 4. 如果没找到，回退到使用 Stagehand AI
       console.log("  [-] 未找到指定输入框，使用 Stagehand AI 分析...");
-      
-      // Stagehand extract API 变化：instruction 作为第一个参数
+
       const pageAnalysis = await stagehand.extract(
         "识别页面上用于填写作品标题(placeholder='填写作品标题，为作品获得更多流量')、作品简介(可能是一个大的文本编辑器区域，用于填写作品介绍/描述)的输入框。注意作品简介可能是一个可编辑的 div 而不是 textarea。"
       );
 
       console.log("  [-] AI 页面分析结果:", pageAnalysis);
 
-      // 使用 Stagehand act 来填充
       await stagehand.act(`在作品标题输入框中输入: ${title}`);
       await page.waitForTimeout(500);
-      
-      // 尝试多种描述输入的指令
+
       await stagehand.act(`在作品简介或作品描述的编辑器中输入: ${description}`);
     }
 
-    // 5. 单独处理标题（通常更容易定位）
-    const titleSelectors = [
-      'input[placeholder*="标题"]',
-      'input[placeholder*="作品标题"]',
-      'input[aria-label*="标题"]',
-    ];
-    
+    const titleSelectors = ['input[placeholder*="标题"]', 'input[placeholder*="作品标题"]', 'input[aria-label*="标题"]'];
+
     for (const selector of titleSelectors) {
       const titleInput = page.locator(selector);
-      if (await titleInput.count() > 0) {
+      if ((await titleInput.count()) > 0) {
         console.log(`  [-] 使用选择器填充标题: ${selector}`);
         await titleInput.first().fill(title);
         break;
       }
     }
 
-    // 6. 如果标题还没填，尝试使用 Stagehand
     try {
       await stagehand.act(`在标题输入框中填写: ${title}`);
     } catch (e) {
       console.log("  [-] Stagehand 填充标题失败，继续下一步");
     }
 
-    // 7. 视频上传完成检查已移至 uploadVideoToDouyin 函数
-    // 这里做双重保险检查，确保上传已完成
     let uploadCheck = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
-    
-    // 备用检测方法
+
     if (uploadCheck === 0) {
       uploadCheck = await page.locator('div:has-text("重新上传")').count();
     }
@@ -461,11 +469,11 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
     }
     if (uploadCheck === 0) {
       const pageText = await page.evaluate(() => document.documentElement.outerHTML);
-      if (pageText.includes('重新上传')) {
+      if (pageText.includes("重新上传")) {
         uploadCheck = 1;
       }
     }
-    
+
     if (uploadCheck === 0) {
       console.log(`  [-] 检测到视频可能还在上传中，等待完成...`);
       const uploadComplete = await waitForVideoUploadComplete(page);
@@ -475,52 +483,49 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
     } else {
       console.log(`  ✓ 视频已上传完毕 (检测到 ${uploadCheck} 个元素)`);
     }
-    
+
     return true;
   } catch (error) {
     console.log(`[详情流程] 填充详情失败: ${(error as Error).message}`);
-    // 尝试保存失败时的页面截图
     try {
-      await page.screenshot({ path: 'debug_error_state.png' });
+      await page.screenshot({ path: "debug_error_state.png" });
       console.log("  [-] 已保存错误时的页面截图到 debug_error_state.png");
     } catch (e) {}
     return false;
   }
 }
 
-/**
- * 设置视频封面
- */
+// =====================
+// 设置视频封面
+// =====================
 async function setThumbnail(page: Page, thumbnailPath: string) {
   if (!thumbnailPath) return;
-  
+
   console.log(`\n[封面流程] 正在设置视频封面: ${thumbnailPath}`);
   try {
     await page.click('text="选择封面"');
     await page.waitForSelector("div.dy-creator-content-modal");
     await page.click('text="设置竖封面"');
     await page.waitForTimeout(2000);
-    
-    // 定位到上传区域并点击
-    const fileChooserPromise = page.waitForEvent('filechooser');
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
     await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").click();
     const fileChooser = await fileChooserPromise;
     await fileChooser.setFiles(thumbnailPath);
-    
+
     await page.waitForTimeout(2000);
     await page.locator("div#tooltip-container button:visible:has-text('完成')").click();
-    
-    console.log('✓ [封面流程] 视频封面设置完成！');
-    // 等待封面设置对话框关闭
-    await page.waitForSelector("div.extractFooter", { state: 'detached' });
+
+    console.log("✓ [封面流程] 视频封面设置完成！");
+    await page.waitForSelector("div.extractFooter", { state: "detached" });
   } catch (error) {
     console.log(`⚠ [封面流程] 设置封面失败: ${(error as Error).message}`);
   }
 }
 
-/**
- * 处理自动视频封面 (当提示 "请设置封面后再发布" 时)
- */
+// =====================
+// 处理自动视频封面
+// =====================
 async function handleAutoVideoCover(page: Page) {
   try {
     const errorTip = page.locator('text="请设置封面后再发布"');
@@ -528,7 +533,7 @@ async function handleAutoVideoCover(page: Page) {
       console.log("  [-] 检测到需要设置封面提示...");
       const recommendCover = page.locator('[class^="recommendCover-"]').first();
 
-      if (await recommendCover.count() > 0) {
+      if ((await recommendCover.count()) > 0) {
         console.log("  [-] 正在选择第一个推荐封面...");
         await recommendCover.click();
         await page.waitForTimeout(1000);
@@ -547,16 +552,13 @@ async function handleAutoVideoCover(page: Page) {
   return false;
 }
 
-/**
- * 处理发布确认对话框
- * 抖音发布后可能会弹出确认对话框
- */
+// =====================
+// 处理发布确认对话框
+// =====================
 async function handlePublishConfirmDialog(page: Page): Promise<boolean> {
   try {
-    // 等待可能的确认对话框出现
     await page.waitForTimeout(1000);
-    
-    // 检查常见的确认按钮文本
+
     const confirmButtonSelectors = [
       'button:has-text("确认发布")',
       'button:has-text("确认")',
@@ -565,10 +567,10 @@ async function handlePublishConfirmDialog(page: Page): Promise<boolean> {
       'text="确认发布"',
       'text="确认"',
     ];
-    
+
     for (const selector of confirmButtonSelectors) {
       const confirmBtn = page.locator(selector);
-      if (await confirmBtn.count() > 0 && await confirmBtn.first().isVisible()) {
+      if ((await confirmBtn.count()) > 0 && (await confirmBtn.first().isVisible())) {
         console.log(`  [-] 检测到确认对话框，点击确认按钮...`);
         await confirmBtn.first().click();
         await page.waitForTimeout(2000);
@@ -581,9 +583,9 @@ async function handlePublishConfirmDialog(page: Page): Promise<boolean> {
   return false;
 }
 
-/**
- * 检查并处理发布页面的各种错误提示
- */
+// =====================
+// 检查发布错误
+// =====================
 async function checkPublishErrors(page: Page): Promise<string | null> {
   const errorPatterns = [
     "请设置封面后再发布",
@@ -597,10 +599,10 @@ async function checkPublishErrors(page: Page): Promise<string | null> {
     "格式不支持",
     "文件过大",
   ];
-  
+
   try {
     const pageText = await page.evaluate(() => document.documentElement.innerText);
-    
+
     for (const pattern of errorPatterns) {
       if (pageText.includes(pattern)) {
         console.log(`  [-] 检测到错误提示: ${pattern}`);
@@ -610,37 +612,32 @@ async function checkPublishErrors(page: Page): Promise<string | null> {
   } catch (e) {
     // 忽略错误
   }
-  
+
   return null;
 }
 
-/**
- * 发布视频 - 修复版本，使用与 Python debug/main.py 一致的定位方式
- */
+// =====================
+// 发布视频
+// =====================
 async function publishVideo(page: Page) {
   console.log(`\n[发布流程] 准备发布视频...`);
-  
-  // 滚动到页面底部查找发布按钮
+
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await page.waitForTimeout(1000);
-  
+
   let attempts = 0;
   const maxAttempts = 5;
-  
+
   while (attempts < maxAttempts) {
     try {
-      // 保存页面截图用于调试 (包含尝试次数信息)
       await page.screenshot({ path: `./debug/publish_page_state_attempt${attempts + 1}.png` });
       console.log(`  [-] 已保存发布页面截图 (尝试 ${attempts + 1})`);
-      
-      // 使用兼容的定位方式
-      // 先尝试 CSS 选择器
+
       let publishButton = page.locator('button:has-text("发布")');
       let buttonCount = await publishButton.count();
       console.log(`  [-] 尝试 CSS 选择器 button:has-text("发布"), 数量: ${buttonCount}`);
 
-      // 获取所有按钮详情用于精确匹配
-      const allPublishButtons = await page.locator('button').evaluateAll((buttons) => {
+      const allPublishButtons = await page.locator("button").evaluateAll((buttons) => {
         return buttons.map((btn, idx) => ({
           index: idx,
           text: btn.textContent?.trim(),
@@ -650,35 +647,30 @@ async function publishVideo(page: Page) {
       });
       console.log(`  [-] 页面所有按钮详情:`, JSON.stringify(allPublishButtons, null, 2));
 
-      // 精确匹配：只选择文本完全等于"发布"的按钮
-      const exactPublishButtons = allPublishButtons.filter(btn => btn.text === '发布');
+      const exactPublishButtons = allPublishButtons.filter((btn) => btn.text === "发布");
       console.log(`  [-] 精确匹配"发布"的按钮:`, JSON.stringify(exactPublishButtons, null, 2));
 
       if (exactPublishButtons.length > 0) {
-        // 使用 XPath 精确匹配只包含"发布"文本的按钮
-        publishButton = page.locator('xpath=//button[normalize-space()="发布"]');
+        publishButton = page.locator("xpath=//button[normalize-space()='发布']");
         buttonCount = await publishButton.count();
         console.log(`  [-] 精确匹配按钮数量: ${buttonCount}`);
       }
 
-      // 尝试 XPath 方式（包含"发布"）
       if (buttonCount === 0) {
-        publishButton = page.locator('xpath=//button[contains(text(), "发布")]');
+        publishButton = page.locator("xpath=//button[contains(text(), '发布')]");
         buttonCount = await publishButton.count();
         console.log(`  [-] 尝试 XPath 方式, 数量: ${buttonCount}`);
       }
-      
-      // 尝试纯 XPath 精确匹配
+
       if (buttonCount === 0) {
-        publishButton = page.locator('xpath=//button[text()="发布"]');
+        publishButton = page.locator("xpath=//button[text()='发布']");
         buttonCount = await publishButton.count();
         console.log(`  [-] 尝试 XPath 精确匹配, 数量: ${buttonCount}`);
       }
-      
-      // 如果还是找不到，打印所有按钮用于调试
+
       if (buttonCount === 0) {
         const allButtons = await page.evaluate(() => {
-          const btns = Array.from(document.querySelectorAll('button'));
+          const btns = Array.from(document.querySelectorAll("button"));
           return btns.map((btn, idx) => ({
             index: idx,
             text: btn.textContent?.trim().substring(0, 30),
@@ -686,27 +678,24 @@ async function publishVideo(page: Page) {
           }));
         });
         console.log(`  [-] 页面上的所有按钮:`, JSON.stringify(allButtons));
-        
-        // 备选方案：直接用 evaluate 点击包含"发布"文本的按钮
+
         console.log(`  [-] 尝试使用 evaluate 直接点击...`);
         const clicked = await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button'));
+          const buttons = Array.from(document.querySelectorAll("button"));
           for (const btn of buttons) {
-            if (btn.textContent?.trim() === '发布') {
+            if (btn.textContent?.trim() === "发布") {
               btn.click();
               return true;
             }
           }
           return false;
         });
-        
+
         if (clicked) {
           console.log(`[发布流程] 已通过 evaluate 点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
-          
-          // 处理可能的确认对话框
+
           await handlePublishConfirmDialog(page);
-          
-          // 等待跳转
+
           let redirected = false;
           const waitStart = Date.now();
           while (Date.now() - waitStart < 3000) {
@@ -717,7 +706,7 @@ async function publishVideo(page: Page) {
             }
             await page.waitForTimeout(500);
           }
-          
+
           if (!redirected) {
             console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
             await handleAutoVideoCover(page);
@@ -725,20 +714,16 @@ async function publishVideo(page: Page) {
           continue;
         }
       }
-      
-      // 滚动到按钮位置并点击
+
       if (buttonCount > 0) {
-        // 先滚动到页面底部确保按钮可见
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await page.waitForTimeout(500);
-        
-        // 使用 evaluate 滚动按钮到可视区域
+
         await publishButton.first().evaluate((btn) => {
-          btn.scrollIntoView({ block: 'center' });
+          btn.scrollIntoView({ block: "center" });
         });
         await page.waitForTimeout(500);
 
-        // 获取所有"发布"按钮的详细信息，用于调试
         const buttonDetails = await publishButton.evaluateAll((buttons) => {
           return buttons.map((btn, idx) => ({
             index: idx,
@@ -749,28 +734,23 @@ async function publishVideo(page: Page) {
           }));
         });
         console.log(`  [-] 所有"发布"按钮详情:`, JSON.stringify(buttonDetails, null, 2));
-        
-        // 点击第一个按钮
+
         await publishButton.first().click();
         console.log(`[发布流程] 已点击发布按钮 (尝试 ${attempts + 1})，实际点击的是第 1 个按钮 (索引 0)`);
         console.log(`  [-] 点击的按钮详情:`, JSON.stringify(buttonDetails[0], null, 2));
-        
-        // 等待可能的确认对话框出现
+
         await page.waitForTimeout(1500);
-        
-        // 处理可能的确认对话框
+
         const confirmHandled = await handlePublishConfirmDialog(page);
         if (confirmHandled) {
           console.log(`  [-] 已处理确认对话框，继续等待跳转...`);
         }
-        
-        // 等待跳转至管理页 (与 Python 一致)
+
         try {
-          // 等待 URL 变化到管理页面，最多等待 3 秒
           const currentUrl = page.url();
           let redirected = false;
           const waitStart = Date.now();
-          
+
           while (Date.now() - waitStart < 3000) {
             const newUrl = page.url();
             if (newUrl.includes("/content/manage")) {
@@ -780,33 +760,28 @@ async function publishVideo(page: Page) {
             }
             await page.waitForTimeout(500);
           }
-          
+
           if (!redirected) {
             console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
-            // 检查各种错误提示
             const errorMsg = await checkPublishErrors(page);
             if (errorMsg) {
               console.log(`  [-] 发现错误: ${errorMsg}`);
             }
           }
         } catch (e) {
-          // URL 没有变化，检查是否有错误提示需要处理
           console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
-          
-          // 检查各种错误提示
+
           const errorMsg = await checkPublishErrors(page);
           if (errorMsg) {
             console.log(`  [-] 发现错误: ${errorMsg}`);
           }
-          
-          // 处理封面问题 (与 Python handle_auto_video_cover 一致)
+
           const coverHandled = await handleAutoVideoCover(page);
           if (coverHandled) {
             console.log(`  [-] 已处理封面问题，尝试再次发布...`);
             continue;
           }
-          
-          // 检查其他可能的错误
+
           const errorTexts = await page.locator('text="请设置封面后再发布"').count();
           if (errorTexts > 0) {
             console.log(`  [-] 检测到需要设置封面`);
@@ -821,175 +796,283 @@ async function publishVideo(page: Page) {
     attempts++;
     await page.waitForTimeout(2000);
   }
-  
+
   console.log(`⚠ [发布流程] 发布失败，已达到最大尝试次数`);
   return false;
 }
 
-/**
- * 验证视频文件是否存在且有效
- */
+// =====================
+// 验证视频文件
+// =====================
 function validateVideoPath(videoPath: string): boolean {
   console.log(`\n[验证流程] 检查视频文件: ${videoPath}`);
-  
-  // 1. 检查文件是否存在
+
   if (!fs.existsSync(videoPath)) {
     console.log(`[-] 视频文件不存在: ${videoPath}`);
     return false;
   }
-  
-  // 2. 检查是否为文件（不是目录）
+
   const stats = fs.statSync(videoPath);
   if (!stats.isFile()) {
     console.log(`[-] 指定路径不是有效文件: ${videoPath}`);
     return false;
   }
-  
-  // 3. 检查文件大小（不能为空）
+
   if (stats.size === 0) {
     console.log(`[-] 视频文件大小为 0: ${videoPath}`);
     return false;
   }
-  
-  // 4. 检查文件扩展名是否为有效视频格式
-  const validExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv'];
-  const ext = videoPath.toLowerCase().substring(videoPath.lastIndexOf('.'));
+
+  const validExtensions = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"];
+  const ext = videoPath.toLowerCase().substring(videoPath.lastIndexOf("."));
   if (!validExtensions.includes(ext)) {
-    console.log(`[-] 视频文件格式不支持: ${ext}，支持的格式: ${validExtensions.join(', ')}`);
+    console.log(`[-] 视频文件格式不支持: ${ext}，支持的格式: ${validExtensions.join(", ")}`);
     return false;
   }
-  
+
   console.log(`[+] 视频文件验证通过`);
   console.log(`    - 文件大小: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
   console.log(`    - 文件格式: ${ext}`);
-  
+
   return true;
 }
 
-/**
- * 视频信息数据类型
- */
-interface VideoInfo {
-  filename: string;      // 视频文件名，如 "xxx.mp4"
-  title: string;         // 视频标题
-  description: string;   // 视频描述/简介
-  tags: string[];        // 视频标签
-}
-
-/**
- * 执行业务任务
- */
-async function performDouyinTasks(stagehand: Stagehand, page: Page, videoinfo: VideoInfo) {
-  // 0. 从 videoinfo 中提取视频路径
-  const videoPath = join(process.cwd(), "upload", videoinfo.filename);
-  
-  // 验证视频文件
-  if (!validateVideoPath(videoPath)) {
-    console.log(`[-] 视频文件验证失败，任务终止`);
-    return;
-  }
-  
-  const videoTitle = videoinfo.title;
-  const videoDescription = videoinfo.description;
-  const videoTags = videoinfo.tags;
-  // 如果有封面图，可以设置此路径
-  const thumbnailPath = ""; 
-
-  // 1. 上传视频
-  const uploadSuccess = await uploadVideoToDouyin(page, videoPath);
-  if (!uploadSuccess) return;
-
-  // 2. 填充详情
-  const fillSuccess = await fillVideoDetails(stagehand, page, videoTitle, videoDescription, videoTags);
-  if (!fillSuccess) return;
-
-  // 3. 设置封面 (可选)
-  if (thumbnailPath) {
-    await setThumbnail(page, thumbnailPath);
-  }
-
-  // 4. 发布
-  await publishVideo(page);
-}
-
-async function main() {
+// =====================
+// 执行上传任务的核心函数
+// =====================
+async function performDouyinUpload(videoInfo: VideoInfo) {
   let stagehand: Stagehand | undefined;
   let page: Page | null = null;
   let authResult: { browser: Browser; context: BrowserContext; page: Page } | null = null;
-  
-  // 定义视频信息
-  const videoinfo: VideoInfo = {
-    filename: "test.mp4",
-    title: "乐在其中",
-    description: "春节还是放鞭炮有意思。",
-    tags: ["宠物", "春节", "放鞭炮"]
-  };
-  
-  // 0. 验证视频文件（使用 videoinfo.filename 构建路径）
-  const videoPath = join(process.cwd(), "upload", videoinfo.filename);
+
+  const videoPath = join(process.cwd(), "upload", videoInfo.filename);
+
   if (!validateVideoPath(videoPath)) {
-    console.log(`[-] 视频文件验证失败，任务终止`);
-    return;
+    throw new Error(`视频文件验证失败: ${videoPath}`);
   }
+
+  const videoTitle = videoInfo.title;
+  const videoDescription = videoInfo.description;
+  const videoTags = videoInfo.tags;
+  const thumbnailPath = "";
 
   try {
     stagehand = await initStagehand();
-    const cookiesPath = process.env.DOUYIN_COOKIES_FILE 
-      ? join(process.cwd(), process.env.DOUYIN_COOKIES_FILE) 
+    const cookiesPath = process.env.DOUYIN_COOKIES_FILE
+      ? join(process.cwd(), process.env.DOUYIN_COOKIES_FILE)
       : join(process.cwd(), "cookies", "douyin.json");
 
     authResult = await cookieAuth(cookiesPath);
 
-    if (authResult != null) {
-      page = authResult.page;
-      // 3. 执行任务
-      await performDouyinTasks(stagehand, page, videoinfo);
-
-      console.log(`\n任务执行完成，浏览器将保持打开 60 秒...`);
-      await page.waitForTimeout(10000);
-    } else {
-      console.log(`\n认证失败！`);
+    if (authResult === null) {
+      throw new Error("Cookie 验证失败，请重新登录");
     }
 
+    page = authResult.page;
 
-  } catch (error) {
-    console.error("发生错误:", error);
+    // 1. 上传视频
+    const uploadSuccess = await uploadVideoToDouyin(page, videoPath);
+    if (!uploadSuccess) {
+      throw new Error("视频上传失败");
+    }
+
+    // 2. 填充详情
+    const fillSuccess = await fillVideoDetails(stagehand, page, videoTitle, videoDescription, videoTags);
+    if (!fillSuccess) {
+      throw new Error("填充视频详情失败");
+    }
+
+    // 3. 设置封面 (可选)
+    if (thumbnailPath) {
+      await setThumbnail(page, thumbnailPath);
+    }
+
+    // 4. 发布
+    const publishSuccess = await publishVideo(page);
+    if (!publishSuccess) {
+      throw new Error("视频发布失败");
+    }
+
+    return {
+      success: true,
+      message: "视频发布成功",
+      videoInfo: {
+        title: videoTitle,
+        filename: videoInfo.filename,
+      },
+    };
   } finally {
-    // 优先关闭 authResult 中的浏览器资源
+    // 清理资源
     if (authResult) {
       console.log(`\n关闭 cookieAuth 浏览器...`);
       try {
         await authResult.page.close();
-      } catch (e) { /* 忽略关闭错误 */ }
+      } catch (e) {
+        /* 忽略关闭错误 */
+      }
       try {
         await authResult.context.close();
-      } catch (e) { /* 忽略关闭错误 */ }
+      } catch (e) {
+        /* 忽略关闭错误 */
+      }
       try {
         await authResult.browser.close();
-      } catch (e) { /* 忽略关闭错误 */ }
+      } catch (e) {
+        /* 忽略关闭错误 */
+      }
     }
 
-    // 关闭 Stagehand 浏览器
     if (stagehand) {
       console.log(`\n关闭 Stagehand 浏览器...`);
-
-      // 添加超时保护，防止 close() 方法卡住
       const closeWithTimeout = async (ms: number) => {
         return Promise.race([
           stagehand.close() as Promise<void>,
-          new Promise<void>((resolve) => setTimeout(() => {
-            console.log(`⚠ 关闭浏览器超时 (${ms}ms)，强制结束...`);
-            resolve();
-          }, ms))
+          new Promise<void>((resolve) =>
+            setTimeout(() => {
+              console.log(`⚠ 关闭浏览器超时 (${ms}ms)，强制结束...`);
+              resolve();
+            }, ms)
+          ),
         ]);
       };
 
-      await closeWithTimeout(5000); // 5秒超时
+      await closeWithTimeout(5000);
     }
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
+// =====================
+// REST API 端点
+// =====================
+
+// 健康检查端点
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+  });
 });
+
+// 上传视频到抖音 API
+app.post("/api/v1/douyin/upload_video", upload.single("video"), async (req, res) => {
+  console.log("\n========== 收到视频上传请求 ==========");
+
+  try {
+    // 验证文件上传
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: "请上传视频文件",
+      });
+    }
+
+    // 获取请求参数
+    const { title, description, tags } = req.body;
+
+    // 验证必填参数
+    if (!title) {
+      return res.status(400).json({
+        success: false,
+        error: "缺少必填参数: title (标题)",
+      });
+    }
+
+    if (!description) {
+      return res.status(400).json({
+        success: false,
+        error: "缺少必填参数: description (描述)",
+      });
+    }
+
+    // 解析标签
+    let parsedTags: string[] = [];
+    if (tags) {
+      if (typeof tags === "string") {
+        parsedTags = tags.split(",").map((t: string) => t.trim()).filter((t: string) => t);
+      } else if (Array.isArray(tags)) {
+        parsedTags = tags;
+      }
+    }
+
+    console.log(`[API] 接收到的参数:`);
+    console.log(`  - 文件名: ${req.file.filename}`);
+    console.log(`  - 原始文件名: ${req.file.originalname}`);
+    console.log(`  - 文件大小: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`  - 标题: ${title}`);
+    console.log(`  - 描述: ${description}`);
+    console.log(`  - 标签: ${parsedTags.join(", ")}`);
+
+    // 构建视频信息对象
+    const videoInfo: VideoInfo = {
+      filename: req.file.filename,
+      title,
+      description,
+      tags: parsedTags,
+    };
+
+    // 执行上传任务
+    const result = await performDouyinUpload(videoInfo);
+
+    console.log("\n========== 视频上传任务完成 ==========");
+    console.log(`结果: ${JSON.stringify(result)}`);
+
+    res.json(result);
+  } catch (error) {
+    console.error("\n========== 上传失败 ==========");
+    console.error(`错误: ${(error as Error).message}`);
+
+    res.status(500).json({
+      success: false,
+      error: (error as Error).message,
+    });
+  }
+});
+
+// 错误处理中间件
+app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("服务器错误:", err.message);
+
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        success: false,
+        error: "文件大小超过限制 (最大 500MB)",
+      });
+    }
+    return res.status(400).json({
+      success: false,
+      error: err.message,
+    });
+  }
+
+  res.status(500).json({
+    success: false,
+    error: "服务器内部错误",
+  });
+});
+
+// =====================
+// 启动服务器
+// =====================
+app.listen(PORT, () => {
+  console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║                    抖音视频上传 API 服务器                        ║
+╠═══════════════════════════════════════════════════════════════╣
+║  服务器运行地址: http://localhost:${PORT}                         ║
+║                                                               ║
+║  可用端点:                                                     ║
+║  - GET  /health              - 健康检查                        ║
+║  - POST /api/v1/douyin/upload_video - 上传视频                 ║
+║                                                               ║
+║  API 使用示例:                                                 ║
+║  curl -X POST http://localhost:${PORT}/api/v1/douyin/upload_video \\  ║
+║    -F "video=@/path/to/video.mp4" \\                           ║
+║    -F "title=视频标题" \\                                       ║
+║    -F "description=视频描述" \\                                 ║
+║    -F "tags=标签1,标签2,标签3"                                  ║
+╚═══════════════════════════════════════════════════════════════╝
+  `);
+});
+
+console.log("API 服务器初始化完成");
