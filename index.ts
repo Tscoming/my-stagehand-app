@@ -840,7 +840,7 @@ function validateVideoPath(videoPath: string): boolean {
 // =====================
 // 执行上传任务的核心函数
 // =====================
-async function performDouyinUpload(videoInfo: VideoInfo) {
+export async function performDouyinUpload(videoInfo: VideoInfo) {
   let stagehand: Stagehand | undefined;
   let page: Page | null = null;
   let authResult: { browser: Browser; context: BrowserContext; page: Page } | null = null;

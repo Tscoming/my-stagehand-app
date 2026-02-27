@@ -24,7 +24,7 @@ echo "-------------------------------------------"
 echo "注意: 请先将测试视频放到项目根目录，并修改下面的VIDEO_PATH变量"
 
 # 可以在这里设置测试视频路径
-VIDEO_PATH="./test-video.mp4"
+VIDEO_PATH="./upload/test_video.mp4"
 
 # 检查视频文件是否存在
 if [ ! -f "$VIDEO_PATH" ]; then
