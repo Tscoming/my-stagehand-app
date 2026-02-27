@@ -545,6 +545,73 @@ async function handleAutoVideoCover(page: Page) {
 }
 
 /**
+ * 处理发布确认对话框
+ * 抖音发布后可能会弹出确认对话框
+ */
+async function handlePublishConfirmDialog(page: Page): Promise<boolean> {
+  try {
+    // 等待可能的确认对话框出现
+    await page.waitForTimeout(1000);
+    
+    // 检查常见的确认按钮文本
+    const confirmButtonSelectors = [
+      'button:has-text("确认发布")',
+      'button:has-text("确认")',
+      'button:has-text("确定发布")',
+      'button:has-text("是")',
+      'text="确认发布"',
+      'text="确认"',
+    ];
+    
+    for (const selector of confirmButtonSelectors) {
+      const confirmBtn = page.locator(selector);
+      if (await confirmBtn.count() > 0 && await confirmBtn.first().isVisible()) {
+        console.log(`  [-] 检测到确认对话框，点击确认按钮...`);
+        await confirmBtn.first().click();
+        await page.waitForTimeout(2000);
+        return true;
+      }
+    }
+  } catch (e) {
+    // 忽略确认对话框处理错误
+  }
+  return false;
+}
+
+/**
+ * 检查并处理发布页面的各种错误提示
+ */
+async function checkPublishErrors(page: Page): Promise<string | null> {
+  const errorPatterns = [
+    "请设置封面后再发布",
+    "标题不能为空",
+    "视频上传中",
+    "内容不能为空",
+    "审核中",
+    "发布失败",
+    "请先登录",
+    "网络异常",
+    "格式不支持",
+    "文件过大",
+  ];
+  
+  try {
+    const pageText = await page.evaluate(() => document.documentElement.innerText);
+    
+    for (const pattern of errorPatterns) {
+      if (pageText.includes(pattern)) {
+        console.log(`  [-] 检测到错误提示: ${pattern}`);
+        return pattern;
+      }
+    }
+  } catch (e) {
+    // 忽略错误
+  }
+  
+  return null;
+}
+
+/**
  * 发布视频 - 修复版本，使用与 Python debug/main.py 一致的定位方式
  */
 async function publishVideo(page: Page) {
@@ -559,17 +626,39 @@ async function publishVideo(page: Page) {
   
   while (attempts < maxAttempts) {
     try {
-      // 保存页面截图用于调试
-      await page.screenshot({ path: './debug/publish_page_state.png' });
-      console.log(`  [-] 已保存发布页面截图`);
+      // 保存页面截图用于调试 (包含尝试次数信息)
+      await page.screenshot({ path: `./debug/publish_page_state_attempt${attempts + 1}.png` });
+      console.log(`  [-] 已保存发布页面截图 (尝试 ${attempts + 1})`);
       
       // 使用兼容的定位方式
       // 先尝试 CSS 选择器
       let publishButton = page.locator('button:has-text("发布")');
       let buttonCount = await publishButton.count();
       console.log(`  [-] 尝试 CSS 选择器 button:has-text("发布"), 数量: ${buttonCount}`);
-      
-      // 尝试 XPath 方式
+
+      // 获取所有按钮详情用于精确匹配
+      const allPublishButtons = await page.locator('button').evaluateAll((buttons) => {
+        return buttons.map((btn, idx) => ({
+          index: idx,
+          text: btn.textContent?.trim(),
+          className: btn.className,
+          id: btn.id,
+        }));
+      });
+      console.log(`  [-] 页面所有按钮详情:`, JSON.stringify(allPublishButtons, null, 2));
+
+      // 精确匹配：只选择文本完全等于"发布"的按钮
+      const exactPublishButtons = allPublishButtons.filter(btn => btn.text === '发布');
+      console.log(`  [-] 精确匹配"发布"的按钮:`, JSON.stringify(exactPublishButtons, null, 2));
+
+      if (exactPublishButtons.length > 0) {
+        // 使用 XPath 精确匹配只包含"发布"文本的按钮
+        publishButton = page.locator('xpath=//button[normalize-space()="发布"]');
+        buttonCount = await publishButton.count();
+        console.log(`  [-] 精确匹配按钮数量: ${buttonCount}`);
+      }
+
+      // 尝试 XPath 方式（包含"发布"）
       if (buttonCount === 0) {
         publishButton = page.locator('xpath=//button[contains(text(), "发布")]');
         buttonCount = await publishButton.count();
@@ -611,6 +700,9 @@ async function publishVideo(page: Page) {
         if (clicked) {
           console.log(`[发布流程] 已通过 evaluate 点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
           
+          // 处理可能的确认对话框
+          await handlePublishConfirmDialog(page);
+          
           // 等待跳转
           let redirected = false;
           const waitStart = Date.now();
@@ -642,10 +734,32 @@ async function publishVideo(page: Page) {
           btn.scrollIntoView({ block: 'center' });
         });
         await page.waitForTimeout(500);
+
+        // 获取所有"发布"按钮的详细信息，用于调试
+        const buttonDetails = await publishButton.evaluateAll((buttons) => {
+          return buttons.map((btn, idx) => ({
+            index: idx,
+            text: btn.textContent?.trim(),
+            className: btn.className,
+            id: btn.id,
+            tagName: btn.tagName,
+          }));
+        });
+        console.log(`  [-] 所有"发布"按钮详情:`, JSON.stringify(buttonDetails, null, 2));
         
-        // 点击按钮
+        // 点击第一个按钮
         await publishButton.first().click();
-        console.log(`[发布流程] 已点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
+        console.log(`[发布流程] 已点击发布按钮 (尝试 ${attempts + 1})，实际点击的是第 1 个按钮 (索引 0)`);
+        console.log(`  [-] 点击的按钮详情:`, JSON.stringify(buttonDetails[0], null, 2));
+        
+        // 等待可能的确认对话框出现
+        await page.waitForTimeout(1500);
+        
+        // 处理可能的确认对话框
+        const confirmHandled = await handlePublishConfirmDialog(page);
+        if (confirmHandled) {
+          console.log(`  [-] 已处理确认对话框，继续等待跳转...`);
+        }
         
         // 等待跳转至管理页 (与 Python 一致)
         try {
@@ -666,10 +780,21 @@ async function publishVideo(page: Page) {
           
           if (!redirected) {
             console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
+            // 检查各种错误提示
+            const errorMsg = await checkPublishErrors(page);
+            if (errorMsg) {
+              console.log(`  [-] 发现错误: ${errorMsg}`);
+            }
           }
         } catch (e) {
           // URL 没有变化，检查是否有错误提示需要处理
           console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
+          
+          // 检查各种错误提示
+          const errorMsg = await checkPublishErrors(page);
+          if (errorMsg) {
+            console.log(`  [-] 发现错误: ${errorMsg}`);
+          }
           
           // 处理封面问题 (与 Python handle_auto_video_cover 一致)
           const coverHandled = await handleAutoVideoCover(page);
@@ -775,7 +900,7 @@ async function main() {
   let stagehand: Stagehand | undefined;
   let page: Page | null = null;
   let authResult: { browser: Browser; context: BrowserContext; page: Page } | null = null;
-  const videoPath = join(process.cwd(), "upload", "Nj2ZYQhUFaYRYriL.mp4");
+  const videoPath = join(process.cwd(), "upload", "test.mp4");
   // 0. 验证视频文件
   if (!validateVideoPath(videoPath)) {
     console.log(`[-] 视频文件验证失败，任务终止`);
