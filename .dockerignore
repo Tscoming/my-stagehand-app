@@ -1,0 +1,10 @@
+# Docker 相关文件 (不需要打包)
+docker-compose.yml
+Dockerfile
+.dockerignore
+DOCKER.md
+
+# 本地环境配置 (通过 volume 映射)
+.env
+env/
+cookies/

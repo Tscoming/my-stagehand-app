@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  douyin-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: douyin-upload-api
+    ports:
+      - "3000:3000"
+    volumes:
+      # 映射 .env 文件到容器 (包含 OPENAI_API_KEY 等敏感配置)
+      - ./.env:/app/.env:ro
+      # 持久化 Cookie 文件 (需要预先放置 douyin.json)
+      - ./cookies:/app/cookies
+      # 持久化调试截图
+      - ./debug:/app/debug
+      # 持久化上传的文件
+      - ./upload:/app/upload
+    # 无头模式运行 Chromium (生产环境推荐)
+    restart: unless-stopped
+    # 针对 Playwright/Chromium 的额外配置
+    shm_size: '2gb'
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
