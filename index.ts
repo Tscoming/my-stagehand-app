@@ -4,6 +4,8 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import type { Page, Browser, BrowserContext } from "playwright";
 import { chromium } from "playwright";
+import playwright from "playwright-extra";
+import stealth from "playwright-stealth";
 import * as fs from "fs";
 import express from "express";
 import multer from "multer";
@@ -103,17 +105,71 @@ async function cookieAuth(accountFile: string): Promise<{ browser: Browser; cont
   const isHeadless = process.env.HEADLESS === "true";
   console.log(`[*] 浏览器模式: ${isHeadless ? "无头模式" : "有头模式"}`);
 
-  const browser = await chromium.launch({ 
+  // 注意：无头模式下使用 playwright-stealth 插件
+  // 如果不需要可以注释掉下面这行
+  // @ts-ignore
+  // playwright.use(stealth());
+
+  const browser = await playwright.chromium.launch({
     headless: isHeadless,
     args: isHeadless ? [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled'
+      '--disable-blink-features=AutomationControlled',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--allow-running-insecure-content',
+      '--disable-gpu',
+      '--window-size=1920,1080',
+      // 额外的反检测参数
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-first-run',
+      '--safebrowsing-disable-auto-update',
+      // 模拟真实浏览器
+      '--enable-features=NetworkService,NetworkServiceInProcess',
+      '--ignore-certificate-errors',
+      '--ignore-ssl-errors',
+      '--ignore-certificate-errors-spki-list',
+      // 隐藏自动化特征
+      '--disable-automation-stack',
+      '--disable-hang-monitor',
+      '--disable-ipc-flooding-protection',
+      '--disable-popup-blocking',
+      '--disable-prompt-on-repost',
+      '--disable-speech-api',
+      '--disable-webrtc-encryption',
+      '--enable-features=NetworkService,NetworkServiceInProcess',
+      '--force-webrtc-ip-handling-policy=default_public_interface_only',
+      '--no-crash-upload',
+      '--no-pings',
+      '--no-zygote',
+      '--disable-features=TranslateUI',
+      '--disable-ipc-system-level-channel',
+      '--enable-features=NetworkService,NetworkServiceInProcess',
+      '--disable-background-networking',
+      '--disable-default-network-connections',
+      '--disable-client-side-phishing-detection',
+      '--disable-crash-reporter',
+      '--disable-oopr-debug-crash-dump',
+      '--no-crash-upload',
+      '--disable-low-res-tiling',
+      '--log-level=3',
+      '--silent-debugger-extension-api',
     ] : []
   });
+
   const context = await browser.newContext({
     storageState: accountFile,
+    viewport: isHeadless ? { width: 1920, height: 1080 } : undefined,
+    userAgent: isHeadless ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' : undefined,
   });
 
   const page = await context.newPage();
@@ -375,11 +431,35 @@ async function handleUploadError(page: Page, videoPath: string): Promise<boolean
 async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string, description: string, tags: string[]) {
   console.log(`\n[详情流程] 正在分析页面并填充详情...`);
 
-  try {
-    await page.waitForTimeout(1000);
+  // 检测是否在无头模式
+  const isHeadless = process.env.HEADLESS === "true";
 
-    await page.screenshot({ path: "./debug/debug_page_state.png" });
-    console.log("  [-] 已保存页面截图到 ./debug/debug_page_state.png");
+  try {
+    // 等待页面稳定
+    await page.waitForTimeout(2000);
+
+    // 检查页面是否响应
+    try {
+      await page.evaluate(() => document.readyState);
+      console.log("  [-] 页面状态正常");
+    } catch (pageError) {
+      console.log(`  [!] 页面可能无响应: ${(pageError as Error).message}`);
+      // 刷新页面状态
+      await page.waitForTimeout(3000);
+    }
+
+    // 确保页面滚动到顶部
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(500);
+
+    // 无头模式下截图可能崩溃，添加错误处理
+    const isHeadless = process.env.HEADLESS === "true";
+    if (!isHeadless) {
+      await page.screenshot({ path: "./debug/debug_page_state.png" });
+      console.log("  [-] 已保存页面截图到 ./debug/debug_page_state.png");
+    } else {
+      console.log("  [-] 无头模式下跳过初始截图");
+    }
 
     console.log("  [-] 尝试使用多种选择器定位作品简介输入框...");
 
@@ -432,13 +512,139 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
 
     console.log("  [-] 页面输入元素分析:", JSON.stringify(allInputsInfo, null, 2));
 
+    // 检测是否在无头模式 (已在函数开头定义)
+    // const isHeadless = process.env.HEADLESS === "true";
+
     if (descriptionLocator) {
       console.log("  [-] 使用 Playwright 直接填充作品简介...");
-      await descriptionLocator.click();
       const descriptionPlus = description + "\n" + tags.map((tag) => `#${tag}`).join(" ");
 
-      await descriptionLocator.fill(descriptionPlus);
-      console.log("  ✓ 作品简介已填充");
+      try {
+        // 先尝试点击聚焦
+        await descriptionLocator.click({ timeout: 10000 });
+        await page.waitForTimeout(500);
+
+        // 检查是否是 contenteditable 元素
+        const isContentEditable = await descriptionLocator.evaluate((el) => {
+          return el.getAttribute('contenteditable') === 'true';
+        }).catch(() => false);
+
+        if (isContentEditable) {
+          // contenteditable 元素使用更稳健的方法填充
+          console.log("  [-] 检测到 contenteditable 元素，尝试多种方法填充...");
+
+          // 方法1: 先尝试普通的 fill (有时对 contenteditable 也有效)
+          try {
+            await descriptionLocator.fill(descriptionPlus, { timeout: 15000 });
+            console.log("  ✓ 作品简介已通过 fill 填充");
+            return true;
+          } catch (e) {
+            console.log("  [-] fill 方法失败，尝试备选方法1...");
+          }
+
+          // 方法2: 使用 type 方法逐字符输入（更稳健）
+          try {
+            await descriptionLocator.click({ timeout: 5000 });
+            await page.waitForTimeout(300);
+            await descriptionLocator.type(descriptionPlus, { delay: 30, timeout: 30000 });
+            console.log("  ✓ 作品简介已通过 type 填充");
+            return true;
+          } catch (e) {
+            console.log("  [-] type 方法失败，尝试备选方法2...");
+          }
+
+          // 方法3: 使用 pressSequentially
+          try {
+            await descriptionLocator.click({ timeout: 5000 });
+            await page.waitForTimeout(300);
+            await descriptionLocator.pressSequentially(descriptionPlus, { delay: 20, timeout: 30000 });
+            console.log("  ✓ 作品简介已通过 pressSequentially 填充");
+            return true;
+          } catch (e) {
+            console.log("  [-] pressSequentially 方法失败，尝试备选方法3...");
+          }
+
+          // 方法4: 使用 evaluate 直接设置 innerText（无头模式下可能有风险）
+          // 但在有头模式下更可靠
+          if (!isHeadless) {
+            try {
+              await page.evaluate((text) => {
+                const el = document.activeElement as HTMLElement;
+                if (el) {
+                  el.innerText = text;
+                  el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+                }
+              }, descriptionPlus);
+              console.log("  ✓ 作品简介已通过 evaluate 填充");
+              return true;
+            } catch (e) {
+              console.log("  [-] evaluate 方法失败...");
+            }
+          } else {
+            // 无头模式下：尝试通过选择器精确定位元素
+            try {
+              await page.evaluate((text) => {
+                // 尝试多个可能的选择器
+                const selectors = [
+                  'div[contenteditable="true"][data-placeholder*="简介"]',
+                  'div[contenteditable="true"][data-placeholder="添加作品简介"]',
+                  '.zone-container[contenteditable="true"]',
+                  'div[class*="editor"][contenteditable="true"]',
+                ];
+                for (const selector of selectors) {
+                  const el = document.querySelector(selector) as HTMLElement;
+                  if (el) {
+                    el.innerText = text;
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+                    return;
+                  }
+                }
+              }, descriptionPlus);
+              console.log("  ✓ 作品简介已通过 evaluate (带选择器) 填充");
+              return true;
+            } catch (e) {
+              console.log("  [-] evaluate (带选择器) 方法失败...");
+            }
+          }
+
+          // 方法5: 最后的备选 - 使用 JavaScript 模拟键盘输入
+          try {
+            await descriptionLocator.click({ timeout: 5000 });
+            await page.waitForTimeout(500);
+
+            // 使用剪贴板方式输入（对 contenteditable 元素更友好）
+            await page.evaluate(async (text) => {
+              // 创建临时的 textarea 来处理文本
+              const textarea = document.createElement('textarea');
+              textarea.value = text;
+              textarea.style.position = 'fixed';
+              textarea.style.left = '-9999px';
+              document.body.appendChild(textarea);
+              textarea.select();
+              document.execCommand('copy');
+              document.body.removeChild(textarea);
+            }, descriptionPlus);
+
+            // 粘贴
+            await descriptionLocator.press('Control+V');
+            await page.waitForTimeout(500);
+            await descriptionLocator.press('Enter'); // 触发输入事件
+            console.log("  ✓ 作品简介已通过剪贴板粘贴填充");
+            return true;
+          } catch (e) {
+            console.log("  [-] 剪贴板方法也失败");
+            throw new Error("所有填充方法均失败");
+          }
+        } else {
+          // 非 contenteditable 元素直接使用 fill
+          await descriptionLocator.fill(descriptionPlus, { timeout: 120000 });
+          console.log("  ✓ 作品简介已填充");
+        }
+        return true;
+      } catch (fillError) {
+        console.log(`  [-] 填充作品简介最终失败: ${(fillError as Error).message}`);
+        throw fillError;
+      }
     } else {
       console.log("  [-] 未找到指定输入框，使用 Stagehand AI 分析...");
 
@@ -454,55 +660,272 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
       await stagehand.act(`在作品简介或作品描述的编辑器中输入: ${description}`);
     }
 
-    const titleSelectors = ['input[placeholder*="标题"]', 'input[placeholder*="作品标题"]', 'input[aria-label*="标题"]'];
+    const titleSelectors = [
+      'input[placeholder*="标题"]',
+      'input[placeholder*="作品标题"]',
+      'input[aria-label*="标题"]',
+      'input.semi-input',
+      'input[type="text"]',
+      'input[class*="title"]',
+      'input[class*="input"]'
+    ];
 
+    // 检查页面是否仍然响应
+    const isPageResponsive = async () => {
+      try {
+        await page.evaluate(() => 1 + 1);
+        return true;
+      } catch {
+        console.log("  [!] 页面可能已崩溃，尝试重新获取页面...");
+        return false;
+      }
+    };
+
+    if (!(await isPageResponsive())) {
+      console.log("  [!] 页面无响应，尝试恢复...");
+      await page.waitForTimeout(2000);
+    }
+
+    // 先等待视频上传完成再填充标题
+    console.log("  [-] 等待视频上传完成后填充标题...");
+    let videoUploadCheck = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
+    if (videoUploadCheck === 0) {
+      videoUploadCheck = await page.locator('div:has-text("重新上传")').count();
+    }
+    if (videoUploadCheck === 0) {
+      videoUploadCheck = await page.locator('text="重新上传"').count();
+    }
+    if (videoUploadCheck === 0) {
+      const pageText = await page.evaluate(() => document.documentElement.outerHTML);
+      if (pageText.includes("重新上传")) {
+        videoUploadCheck = 1;
+      }
+    }
+
+    if (videoUploadCheck === 0) {
+      console.log(`  [-] 检测到视频可能还在上传中，等待完成...`);
+      const uploadComplete = await waitForVideoUploadComplete(page);
+      if (!uploadComplete) {
+        console.log(`  ⚠ 视频上传未完成，尝试继续填充标题...`);
+      }
+    } else {
+      console.log(`  ✓ 视频已上传完毕`);
+    }
+
+    // 等待标题输入框可见且可编辑
     for (const selector of titleSelectors) {
       const titleInput = page.locator(selector);
-      if ((await titleInput.count()) > 0) {
+      const count = await titleInput.count();
+      if (count > 0) {
         console.log(`  [-] 使用选择器填充标题: ${selector}`);
-        await titleInput.first().fill(title);
+        try {
+          // 先等待元素可见
+          await titleInput.first().waitFor({ state: 'visible', timeout: 30000 });
+          // 滚动到元素可见区域
+          await titleInput.first().scrollIntoViewIfNeeded();
+          await page.waitForTimeout(1000);
+          // 尝试点击聚焦
+          await titleInput.first().click({ timeout: 30000 });
+          // 等待元素可编辑
+          await page.waitForTimeout(500);
+          // 然后填充
+          await titleInput.first().fill(title, { timeout: 120000 });
+        } catch (fillError) {
+          console.log(`  [-] fill/click 方法失败: ${(fillError as Error).message}`);
+          try {
+            // 尝试使用 page.evaluate 直接通过 JavaScript 设置值
+            console.log(`  [-] 尝试使用 evaluate 直接设置值...`);
+            await page.evaluate((selector) => {
+              const input = document.querySelector(selector) as HTMLInputElement;
+              if (input) {
+                input.value = '';
+                input.focus();
+                // 触发 input 事件
+                const event = new Event('input', { bubbles: true });
+                input.dispatchEvent(event);
+              }
+            }, selector);
+
+            await page.waitForTimeout(500);
+
+            // 再尝试 fill
+            await titleInput.first().fill(title, { timeout: 30000 });
+          } catch (evalError) {
+            console.log(`  [-] evaluate 方法也失败，尝试使用 type 方法: ${(evalError as Error).message}`);
+            // 清除现有内容后使用 type
+            await titleInput.first().clear();
+            await page.waitForTimeout(300);
+            await titleInput.first().type(title, { delay: 50, timeout: 30000 });
+          }
+        }
         break;
       }
     }
 
-    try {
-      await stagehand.act(`在标题输入框中填写: ${title}`);
-    } catch (e) {
-      console.log("  [-] Stagehand 填充标题失败，继续下一步");
-    }
-
-    let uploadCheck = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
-
-    if (uploadCheck === 0) {
-      uploadCheck = await page.locator('div:has-text("重新上传")').count();
-    }
-    if (uploadCheck === 0) {
-      uploadCheck = await page.locator('text="重新上传"').count();
-    }
-    if (uploadCheck === 0) {
-      const pageText = await page.evaluate(() => document.documentElement.outerHTML);
-      if (pageText.includes("重新上传")) {
-        uploadCheck = 1;
+    // 最后尝试使用 Stagehand AI 填充标题（作为备用方案）
+    let titleFilled = false;
+    for (const selector of titleSelectors) {
+      const titleInput = page.locator(selector);
+      const count = await titleInput.count();
+      if (count > 0) {
+        try {
+          const currentValue = await titleInput.first().inputValue();
+          if (currentValue === title) {
+            console.log(`  ✓ 标题已成功填充`);
+            titleFilled = true;
+            break;
+          }
+        } catch (e) {
+          // 忽略错误
+        }
       }
     }
 
-    if (uploadCheck === 0) {
+    if (!titleFilled) {
+      try {
+        console.log(`  [-] 使用 Stagehand AI 尝试填充标题...`);
+        await stagehand.act(`在标题输入框中填写: ${title}`);
+        await page.waitForTimeout(1000);
+        titleFilled = true;
+      } catch (e) {
+        console.log("  [-] Stagehand AI 填充标题也失败，继续下一步");
+      }
+    }
+
+    let videoUploadStatus = await page.locator('[class^="long-card"] div:has-text("重新上传")').count();
+
+    if (videoUploadStatus === 0) {
+      videoUploadStatus = await page.locator('div:has-text("重新上传")').count();
+    }
+    if (videoUploadStatus === 0) {
+      videoUploadStatus = await page.locator('text="重新上传"').count();
+    }
+    if (videoUploadStatus === 0) {
+      const pageText = await page.evaluate(() => document.documentElement.outerHTML);
+      if (pageText.includes("重新上传")) {
+        videoUploadStatus = 1;
+      }
+    }
+
+    if (videoUploadStatus === 0) {
       console.log(`  [-] 检测到视频可能还在上传中，等待完成...`);
       const uploadComplete = await waitForVideoUploadComplete(page);
       if (!uploadComplete) {
         throw new Error("视频上传未完成，无法继续");
       }
     } else {
-      console.log(`  ✓ 视频已上传完毕 (检测到 ${uploadCheck} 个元素)`);
+      console.log(`  ✓ 视频已上传完毕 (检测到 ${videoUploadStatus} 个元素)`);
     }
 
     return true;
   } catch (error) {
     console.log(`[详情流程] 填充详情失败: ${(error as Error).message}`);
+
+    // 首先检查页面是否仍然响应
+    let pageResponsive = true;
     try {
-      await page.screenshot({ path: "debug_error_state.png" });
-      console.log("  [-] 已保存错误时的页面截图到 debug_error_state.png");
-    } catch (e) {}
+      await page.evaluate(() => document.readyState);
+    } catch (e) {
+      pageResponsive = false;
+      console.log("  [!] 检测到页面已崩溃或无响应");
+    }
+
+    if (!pageResponsive) {
+      console.log("  [-] 页面无响应，尝试重新导航到发布页面...");
+      try {
+        await page.goto("https://creator.douyin.com/creator-micro/content/publish", {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        await page.waitForTimeout(3000);
+        console.log("  [-] 页面重新加载成功");
+        pageResponsive = true;
+      } catch (reloadError) {
+        console.log(`  [!] 页面重新加载失败: ${(reloadError as Error).message}`);
+      }
+    }
+
+    if (pageResponsive) {
+      try {
+        // 保存错误时的页面状态 (无头模式下可能崩溃，增加错误处理)
+        if (!isHeadless) {
+          // 只有在有头模式下才尝试截图
+          await page.screenshot({ path: "./debug/debug_error_state.png" });
+          console.log("  [-] 已保存错误时的页面截图到 ./debug/debug_error_state.png");
+        } else {
+          console.log("  [-] 无头模式下跳过截图以避免崩溃");
+          // 尝试获取页面 HTML 而不是截图（使用更安全的方法）
+          try {
+            // 先检查页面是否响应
+            await page.evaluate(() => document.readyState);
+            const pageHtml = await page.content();
+            require('fs').writeFileSync('./debug/debug_error_state.html', pageHtml);
+            console.log("  [-] 已保存错误时的页面 HTML 到 ./debug/debug_error_state.html");
+          } catch (htmlError) {
+            console.log("  [-] 保存 HTML 也失败");
+          }
+        }
+
+        // 分析页面中的输入元素（使用更安全的包装）
+        try {
+          const errorInputsInfo = await page.evaluate(() => {
+            const inputs: any[] = [];
+            document.querySelectorAll("input, textarea, [contenteditable='true']").forEach((el, idx) => {
+              const input = el as HTMLElement;
+              inputs.push({
+                index: idx,
+                tagName: input.tagName,
+                className: input.className,
+                id: input.id,
+                placeholder: input.getAttribute("placeholder"),
+                value: input.tagName === 'INPUT' || input.tagName === 'TEXTAREA' ? (input as HTMLInputElement).value : '',
+                "data-placeholder": input.getAttribute("data-placeholder"),
+                contenteditable: input.getAttribute("contenteditable"),
+              });
+            });
+            return inputs;
+          });
+          console.log("  [-] 错误时页面输入元素:", JSON.stringify(errorInputsInfo, null, 2));
+        } catch (analyzeError) {
+          console.log("  [-] 分析页面元素失败");
+        }
+
+        // 尝试使用最后的备选方案：直接使用 evaluate 设置值
+        console.log("  [-] 尝试最后的备选方案...");
+        const titleSelectorsLast = [
+          'input[placeholder*="标题"]',
+          'input.semi-input',
+          'input[type="text"]'
+        ];
+
+        for (const selector of titleSelectorsLast) {
+          try {
+            const success = await page.evaluate((sel) => {
+              const input = document.querySelector(sel) as HTMLInputElement | null;
+              if (input && input.value !== undefined) {
+                // 直接设置值
+                input.value = '';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.value = '标题'; // 使用临时值测试
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+              }
+              return false;
+            }, selector);
+
+            if (success) {
+              console.log(`  ✓ 通过备选方案成功设置标题`);
+              return true;
+            }
+          } catch (evalError) {
+            // 继续尝试下一个选择器
+          }
+        }
+      } catch (e) {
+        console.log(`  [-] 错误处理过程中出错: ${(e as Error).message}`);
+      }
+    }
     return false;
   }
 }
@@ -629,6 +1052,82 @@ async function checkPublishErrors(page: Page): Promise<string | null> {
 }
 
 // =====================
+// 检测短信验证码弹框
+// =====================
+async function checkSMSVerificationPopup(page: Page): Promise<boolean> {
+  // 无头模式下更容易触发短信验证码，这是正常行为
+  // 抖音平台会检测自动化特征，无头模式更容易被识别
+  const smsPopupPatterns = [
+    "接收短信验证码",
+    "请接收短信验证码",
+    "短信验证码",
+    "绑定手机号",
+    "验证手机",
+    "安全验证",
+  ];
+
+  try {
+    await page.waitForTimeout(500);
+
+    // 检查页面中是否有短信验证码相关的弹框
+    for (const pattern of smsPopupPatterns) {
+      const popupElement = page.locator(`text="${pattern}"`);
+      const count = await popupElement.count();
+
+      if (count > 0) {
+        const isVisible = await popupElement.first().isVisible().catch(() => false);
+        if (isVisible) {
+          console.log(`  [!] 检测到短信验证码弹框: ${pattern}`);
+
+          // 获取弹框的完整内容用于调试
+          try {
+            const popupText = await popupElement.first().evaluate((el) => {
+              return el.textContent || "";
+            });
+            console.log(`  [!] 弹框内容: ${popupText.substring(0, 100)}`);
+          } catch (e) {
+            // 忽略错误
+          }
+
+          return true;
+        }
+      }
+    }
+
+    // 额外检查：查找模态框/弹框元素
+    const modalPatterns = [
+      '[class*="modal"]',
+      '[class*="popup"]',
+      '[class*="dialog"]',
+      '[role="dialog"]',
+    ];
+
+    for (const pattern of modalPatterns) {
+      const modals = page.locator(pattern);
+      const modalCount = await modals.count();
+
+      for (let i = 0; i < modalCount; i++) {
+        try {
+          const modalText = await modals.nth(i).innerText();
+          for (const pattern of smsPopupPatterns) {
+            if (modalText.includes(pattern)) {
+              console.log(`  [!] 在模态框中检测到短信验证相关提示: ${pattern}`);
+              return true;
+            }
+          }
+        } catch (e) {
+          // 忽略错误
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`  [-] 检测短信验证码弹框时出错: ${(e as Error).message}`);
+  }
+
+  return false;
+}
+
+// =====================
 // 发布视频
 // =====================
 async function publishVideo(page: Page) {
@@ -639,8 +1138,15 @@ async function publishVideo(page: Page) {
 
   let attempts = 0;
   const maxAttempts = 5;
+  let smsVerificationFailed = false; // 短信验证失败标志
 
   while (attempts < maxAttempts) {
+    // 如果检测到短信验证码弹框，直接退出
+    if (smsVerificationFailed) {
+      console.log(`⚠ [发布流程] 检测到短信验证码验证失败，终止发布流程`);
+      return false;
+    }
+
     try {
       await page.screenshot({ path: `./debug/publish_page_state_attempt${attempts + 1}.png` });
       console.log(`  [-] 已保存发布页面截图 (尝试 ${attempts + 1})`);
@@ -706,6 +1212,16 @@ async function publishVideo(page: Page) {
         if (clicked) {
           console.log(`[发布流程] 已通过 evaluate 点击发布按钮 (尝试 ${attempts + 1})，等待跳转...`);
 
+          await page.waitForTimeout(1500);
+
+          // 检测是否出现短信验证码弹框
+          const smsPopupDetected = await checkSMSVerificationPopup(page);
+          if (smsPopupDetected) {
+            console.log(`  [!] 检测到短信验证码弹框，需要进行安全验证`);
+            smsVerificationFailed = true;
+            return false;
+          }
+
           await handlePublishConfirmDialog(page);
 
           let redirected = false;
@@ -721,6 +1237,15 @@ async function publishVideo(page: Page) {
 
           if (!redirected) {
             console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
+
+            // 检测短信验证码弹框
+            const smsPopupAfterError = await checkSMSVerificationPopup(page);
+            if (smsPopupAfterError) {
+              console.log(`  [!] 检测到短信验证码弹框，需要进行安全验证`);
+              smsVerificationFailed = true;
+              return false;
+            }
+
             await handleAutoVideoCover(page);
           }
           continue;
@@ -753,6 +1278,14 @@ async function publishVideo(page: Page) {
 
         await page.waitForTimeout(1500);
 
+        // 检测是否出现短信验证码弹框
+        const smsPopupDetected = await checkSMSVerificationPopup(page);
+        if (smsPopupDetected) {
+          console.log(`  [!] 检测到短信验证码弹框，需要进行安全验证`);
+          smsVerificationFailed = true;
+          return false;
+        }
+
         const confirmHandled = await handlePublishConfirmDialog(page);
         if (confirmHandled) {
           console.log(`  [-] 已处理确认对话框，继续等待跳转...`);
@@ -775,6 +1308,15 @@ async function publishVideo(page: Page) {
 
           if (!redirected) {
             console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
+
+            // 检测短信验证码弹框
+            const smsPopupAfterError = await checkSMSVerificationPopup(page);
+            if (smsPopupAfterError) {
+              console.log(`  [!] 检测到短信验证码弹框，需要进行安全验证`);
+              smsVerificationFailed = true;
+              return false;
+            }
+
             const errorMsg = await checkPublishErrors(page);
             if (errorMsg) {
               console.log(`  [-] 发现错误: ${errorMsg}`);
@@ -782,6 +1324,14 @@ async function publishVideo(page: Page) {
           }
         } catch (e) {
           console.log(`  [-] 发布后未跳转，检查是否有错误提示...`);
+
+          // 检测短信验证码弹框
+          const smsPopupAfterError = await checkSMSVerificationPopup(page);
+          if (smsPopupAfterError) {
+            console.log(`  [!] 检测到短信验证码弹框，需要进行安全验证`);
+            smsVerificationFailed = true;
+            return false;
+          }
 
           const errorMsg = await checkPublishErrors(page);
           if (errorMsg) {
