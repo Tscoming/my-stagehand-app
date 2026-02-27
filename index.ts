@@ -401,7 +401,10 @@ async function fillVideoDetails(stagehand: Stagehand, page: Page, title: string,
     if (descriptionLocator) {
       console.log("  [-] 使用 Playwright 直接填充作品简介...");
       await descriptionLocator.click();
-      await descriptionLocator.fill(description);
+      // 每个tag前加#号并且用空格分隔开形成一个新的字符串
+      const descriptionPlus = description + "\n" + tags.map(tag => `#${tag}`).join(" ");
+      
+      await descriptionLocator.fill(descriptionPlus);
       console.log("  ✓ 作品简介已填充");
     } else {
       // 4. 如果没找到，回退到使用 Stagehand AI
@@ -864,18 +867,31 @@ function validateVideoPath(videoPath: string): boolean {
 }
 
 /**
+ * 视频信息数据类型
+ */
+interface VideoInfo {
+  filename: string;      // 视频文件名，如 "xxx.mp4"
+  title: string;         // 视频标题
+  description: string;   // 视频描述/简介
+  tags: string[];        // 视频标签
+}
+
+/**
  * 执行业务任务
  */
-async function performDouyinTasks(stagehand: Stagehand, page: Page, videoPath: string) {
-  // 0. 验证视频文件
+async function performDouyinTasks(stagehand: Stagehand, page: Page, videoinfo: VideoInfo) {
+  // 0. 从 videoinfo 中提取视频路径
+  const videoPath = join(process.cwd(), "upload", videoinfo.filename);
+  
+  // 验证视频文件
   if (!validateVideoPath(videoPath)) {
     console.log(`[-] 视频文件验证失败，任务终止`);
     return;
   }
   
-  const videoTitle = "破风而行";
-  const videoDescription = "速度与激情。"; // 新增简介参数
-  const videoTags = ["宠物", "竞速"];
+  const videoTitle = videoinfo.title;
+  const videoDescription = videoinfo.description;
+  const videoTags = videoinfo.tags;
   // 如果有封面图，可以设置此路径
   const thumbnailPath = ""; 
 
@@ -900,8 +916,17 @@ async function main() {
   let stagehand: Stagehand | undefined;
   let page: Page | null = null;
   let authResult: { browser: Browser; context: BrowserContext; page: Page } | null = null;
-  const videoPath = join(process.cwd(), "upload", "test.mp4");
-  // 0. 验证视频文件
+  
+  // 定义视频信息
+  const videoinfo: VideoInfo = {
+    filename: "test.mp4",
+    title: "乐在其中",
+    description: "春节还是放鞭炮有意思。",
+    tags: ["宠物", "春节", "放鞭炮"]
+  };
+  
+  // 0. 验证视频文件（使用 videoinfo.filename 构建路径）
+  const videoPath = join(process.cwd(), "upload", videoinfo.filename);
   if (!validateVideoPath(videoPath)) {
     console.log(`[-] 视频文件验证失败，任务终止`);
     return;
@@ -909,20 +934,16 @@ async function main() {
 
   try {
     stagehand = await initStagehand();
-    const cookiesPath = join(process.cwd(), "cookies", "douyin.json");
-
-    // 1. 注入 Cookie 并获取 page
-    // const page = await injectCookies(stagehand, cookiesPath);
-
-    // 2. 验证状态
-    // const isAuthenticated = await verifyAuthStatus(cookiesPath);
+    const cookiesPath = process.env.DOUYIN_COOKIES_FILE 
+      ? join(process.cwd(), process.env.DOUYIN_COOKIES_FILE) 
+      : join(process.cwd(), "cookies", "douyin.json");
 
     authResult = await cookieAuth(cookiesPath);
 
     if (authResult != null) {
       page = authResult.page;
       // 3. 执行任务
-      await performDouyinTasks(stagehand, page, videoPath);
+      await performDouyinTasks(stagehand, page, videoinfo);
 
       console.log(`\n任务执行完成，浏览器将保持打开 60 秒...`);
       await page.waitForTimeout(10000);
